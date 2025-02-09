@@ -1,553 +1,719 @@
 package cluster
 
 import (
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 	"sort"
 
 	"github.com/google/uuid"
+	"github.com/klauspost/compress/zstd"
 )
 
 // KDTree implements a KD-tree for spatial indexing
 type KDTree struct {
-    Root     *KDNode
-    Points   []KDPoint   // Store all points for easy access
-    NodeSize int
-    Bounds   KDBounds
+	Root     *KDNode
+	Points   []KDPoint // Store all points for easy access
+	NodeSize int
+	Bounds   KDBounds
 }
 
 // KDNode represents a node in the KD-tree
 type KDNode struct {
-    Point    KDPoint
-    Left     *KDNode
-    Right    *KDNode
-    Axis     int    // 0 for X, 1 for Y
-    MinChild uint32 // Minimum point ID in subtree
-    MaxChild uint32 // Maximum point ID in subtree
+	Point    KDPoint
+	Left     *KDNode
+	Right    *KDNode
+	Axis     int    // 0 for X, 1 for Y
+	MinChild uint32 // Minimum point ID in subtree
+	MaxChild uint32 // Maximum point ID in subtree
 }
 
 // Supercluster implements the clustering algorithm
 type Supercluster struct {
-    Tree    *KDTree       // Single KD-tree for all zoom levels
-    Points  []Point       // Original input points
-    Options SuperclusterOptions
+	Tree    *KDTree // Single KD-tree for all zoom levels
+	Points  []Point // Original input points
+	Options SuperclusterOptions
 }
 
 type SuperclusterOptions struct {
-    MinZoom   int
-    MaxZoom   int
-    MinPoints int
-    Radius    float64
-    NodeSize  int
-    Extent    int
-    Log       bool
+	MinZoom   int
+	MaxZoom   int
+	MinPoints int
+	Radius    float64
+	NodeSize  int
+	Extent    int
+	Log       bool
 }
 
 // GeoJSON types
 type Feature struct {
-    Type       string                 `json:"type"`
-    Geometry   Geometry               `json:"geometry"`
-    Properties map[string]interface{} `json:"properties"`
+	Type       string                 `json:"type"`
+	Geometry   Geometry               `json:"geometry"`
+	Properties map[string]interface{} `json:"properties"`
 }
 
 type FeatureCollection struct {
-    Type     string    `json:"type"`
-    Features []Feature `json:"features"`
+	Type     string    `json:"type"`
+	Features []Feature `json:"features"`
 }
 
 type Geometry struct {
-    Type        string    `json:"type"`
-    Coordinates []float64 `json:"coordinates"`
+	Type        string    `json:"type"`
+	Coordinates []float64 `json:"coordinates"`
 }
 
 // ToGeoJSON converts clusters to GeoJSON format
 func (sc *Supercluster) ToGeoJSON(bounds KDBounds, zoom int) (*FeatureCollection, error) {
-    // Get clusters for the given bounds and zoom level
-    clusters := sc.GetClusters(bounds, zoom)
+	// Get clusters for the given bounds and zoom level
+	clusters := sc.GetClusters(bounds, zoom)
 
-    // Convert clusters to GeoJSON features
-    features := make([]Feature, len(clusters))
-    for i, cluster := range clusters {
-        // Create properties map
-        properties := make(map[string]interface{})
-        properties["cluster"] = cluster.Count > 1
-        properties["cluster_id"] = cluster.ID
-        properties["point_count"] = cluster.Count
+	// Convert clusters to GeoJSON features
+	features := make([]Feature, len(clusters))
+	for i, cluster := range clusters {
+		// Create properties map
+		properties := make(map[string]interface{})
+		properties["cluster"] = cluster.Count > 1
+		properties["cluster_id"] = cluster.ID
+		properties["point_count"] = cluster.Count
 
-        // Add metrics if they exist
-        if cluster.Metrics.Values != nil {
-            properties["metrics"] = cluster.Metrics.Values
-        }
+		// Add metrics if they exist
+		if cluster.Metrics.Values != nil {
+			properties["metrics"] = cluster.Metrics.Values
+		}
 
-        // Add metadata if it exists
-        if cluster.Metadata != nil {
-            for k, v := range cluster.Metadata {
-                properties[k] = v
-            }
-        }
+		// Add metadata if it exists
+		if cluster.Metadata != nil {
+			for k, v := range cluster.Metadata {
+				properties[k] = v
+			}
+		}
 
-        // Create feature
-        features[i] = Feature{
-            Type: "Feature",
-            Geometry: Geometry{
-                Type:        "Point",
-                Coordinates: []float64{float64(cluster.X), float64(cluster.Y)},
-            },
-            Properties: properties,
-        }
-    }
+		// Create feature
+		features[i] = Feature{
+			Type: "Feature",
+			Geometry: Geometry{
+				Type:        "Point",
+				Coordinates: []float64{float64(cluster.X), float64(cluster.Y)},
+			},
+			Properties: properties,
+		}
+	}
 
-    return &FeatureCollection{
-        Type:     "FeatureCollection",
-        Features: features,
-    }, nil
+	return &FeatureCollection{
+		Type:     "FeatureCollection",
+		Features: features,
+	}, nil
 }
 
 // NewSupercluster creates a new clustering instance with the specified options.
 // It validates and sets default values for the options if not provided.
 func NewSupercluster(options SuperclusterOptions) *Supercluster {
-    // Set default values if not provided
-    if options.MinZoom < 0 {
-        options.MinZoom = 0
-    }
-    if options.MaxZoom <= 0 {
-        options.MaxZoom = 16
-    }
-    if options.NodeSize <= 0 {
-        options.NodeSize = 64
-    }
-    if options.Extent <= 0 {
-        options.Extent = 512
-    }
-    if options.Radius <= 0 {
-        options.Radius = 40
-    }
-    if options.MinPoints <= 0 {
-        options.MinPoints = 3
-    }
+	// Set default values if not provided
+	if options.MinZoom < 0 {
+		options.MinZoom = 0
+	}
+	if options.MaxZoom <= 0 {
+		options.MaxZoom = 16
+	}
+	if options.NodeSize <= 0 {
+		options.NodeSize = 64
+	}
+	if options.Extent <= 0 {
+		options.Extent = 512
+	}
+	if options.Radius <= 0 {
+		options.Radius = 40
+	}
+	if options.MinPoints <= 0 {
+		options.MinPoints = 3
+	}
 
-    // Validate zoom levels
-    if options.MinZoom > options.MaxZoom {
-        options.MinZoom = options.MaxZoom
-    }
-    if options.MaxZoom > 16 {
-        options.MaxZoom = 16
-    }
+	// Validate zoom levels
+	if options.MinZoom > options.MaxZoom {
+		options.MinZoom = options.MaxZoom
+	}
+	if options.MaxZoom > 16 {
+		options.MaxZoom = 16
+	}
 
-    return &Supercluster{
-        Tree:    nil,    // Will be initialized when Load() is called
-        Points:  nil,    // Will be initialized when Load() is called
-        Options: options,
-    }
+	return &Supercluster{
+		Tree:    nil, // Will be initialized when Load() is called
+		Points:  nil, // Will be initialized when Load() is called
+		Options: options,
+	}
 }
 
 // NewKDTree creates a new KD-tree with optimized construction
 func NewKDTree(points []KDPoint, nodeSize int) *KDTree {
-    fmt.Printf("Creating KD-tree with %d points\n", len(points))
-    
-    if len(points) == 0 {
-        return &KDTree{
-            Points:   []KDPoint{},
-            NodeSize: nodeSize,
-        }
-    }
+	fmt.Printf("Creating KD-tree with %d points\n", len(points))
 
-    // Make a copy of the points slice to avoid modifying the original
-    pointsCopy := make([]KDPoint, len(points))
-    copy(pointsCopy, points)
+	if len(points) == 0 {
+		return &KDTree{
+			Points:   []KDPoint{},
+			NodeSize: nodeSize,
+		}
+	}
 
-    bounds := KDBounds{
-        MinX: float32(math.Inf(1)),
-        MinY: float32(math.Inf(1)),
-        MaxX: float32(math.Inf(-1)),
-        MaxY: float32(math.Inf(-1)),
-    }
+	// Make a copy of the points slice to avoid modifying the original
+	pointsCopy := make([]KDPoint, len(points))
+	copy(pointsCopy, points)
 
-    // Calculate bounds
-    for _, p := range pointsCopy {
-        bounds.Extend(p.X, p.Y)
-    }
+	bounds := KDBounds{
+		MinX: float32(math.Inf(1)),
+		MinY: float32(math.Inf(1)),
+		MaxX: float32(math.Inf(-1)),
+		MaxY: float32(math.Inf(-1)),
+	}
 
-    // Create tree
-    tree := &KDTree{
-        Points:   pointsCopy, // Store the copy of points
-        NodeSize: nodeSize,
-        Bounds:   bounds,
-    }
+	// Calculate bounds
+	for _, p := range pointsCopy {
+		bounds.Extend(p.X, p.Y)
+	}
 
-    // Build tree recursively
-    tree.Root = tree.buildNode(pointsCopy, 0)
-    
-    fmt.Printf("Created KD-tree with %d points and bounds: MinX=%f, MinY=%f, MaxX=%f, MaxY=%f\n",
-        len(tree.Points), bounds.MinX, bounds.MinY, bounds.MaxX, bounds.MaxY)
-    
-    return tree
+	// Create tree
+	tree := &KDTree{
+		Points:   pointsCopy, // Store the copy of points
+		NodeSize: nodeSize,
+		Bounds:   bounds,
+	}
+
+	// Build tree recursively
+	tree.Root = tree.buildNode(pointsCopy, 0)
+
+	fmt.Printf("Created KD-tree with %d points and bounds: MinX=%f, MinY=%f, MaxX=%f, MaxY=%f\n",
+		len(tree.Points), bounds.MinX, bounds.MinY, bounds.MaxX, bounds.MaxY)
+
+	return tree
 }
 
 // buildNode constructs a KD-tree node recursively
 func (t *KDTree) buildNode(points []KDPoint, depth int) *KDNode {
-    n := len(points)
-    if n == 0 {
-        return nil
-    }
+	n := len(points)
+	if n == 0 {
+		return nil
+	}
 
-    // Create leaf node if we're at nodeSize or below
-    if n <= t.NodeSize {
-        node := &KDNode{
-            Point:    points[0],
-            MinChild: points[0].ID,
-            MaxChild: points[0].ID,
-        }
-        // Update min/max IDs
-        for _, p := range points[1:] {
-            if p.ID < node.MinChild {
-                node.MinChild = p.ID
-            }
-            if p.ID > node.MaxChild {
-                node.MaxChild = p.ID
-            }
-        }
-        return node
-    }
+	// Create leaf node if we're at nodeSize or below
+	if n <= t.NodeSize {
+		node := &KDNode{
+			Point:    points[0],
+			MinChild: points[0].ID,
+			MaxChild: points[0].ID,
+		}
+		// Update min/max IDs
+		for _, p := range points[1:] {
+			if p.ID < node.MinChild {
+				node.MinChild = p.ID
+			}
+			if p.ID > node.MaxChild {
+				node.MaxChild = p.ID
+			}
+		}
+		return node
+	}
 
-    // Choose axis based on depth
-    axis := depth % 2
+	// Choose axis based on depth
+	axis := depth % 2
 
-    // Sort points by the chosen axis
-    if axis == 0 {
-        sort.Slice(points, func(i, j int) bool {
-            return points[i].X < points[j].X
-        })
-    } else {
-        sort.Slice(points, func(i, j int) bool {
-            return points[i].Y < points[j].Y
-        })
-    }
+	// Sort points by the chosen axis
+	if axis == 0 {
+		sort.Slice(points, func(i, j int) bool {
+			return points[i].X < points[j].X
+		})
+	} else {
+		sort.Slice(points, func(i, j int) bool {
+			return points[i].Y < points[j].Y
+		})
+	}
 
-    // Find median
-    median := n / 2
+	// Find median
+	median := n / 2
 
-    // Create node
-    node := &KDNode{
-        Point: points[median],
-        Axis:  axis,
-    }
+	// Create node
+	node := &KDNode{
+		Point: points[median],
+		Axis:  axis,
+	}
 
-    // Recursively build left and right subtrees
-    node.Left = t.buildNode(points[:median], depth+1)
-    node.Right = t.buildNode(points[median+1:], depth+1)
+	// Recursively build left and right subtrees
+	node.Left = t.buildNode(points[:median], depth+1)
+	node.Right = t.buildNode(points[median+1:], depth+1)
 
-    // Update min/max child IDs
-    node.MinChild = node.Point.ID
-    node.MaxChild = node.Point.ID
-    
-    if node.Left != nil {
-        if node.Left.MinChild < node.MinChild {
-            node.MinChild = node.Left.MinChild
-        }
-        if node.Left.MaxChild > node.MaxChild {
-            node.MaxChild = node.Left.MaxChild
-        }
-    }
-    if node.Right != nil {
-        if node.Right.MinChild < node.MinChild {
-            node.MinChild = node.Right.MinChild
-        }
-        if node.Right.MaxChild > node.MaxChild {
-            node.MaxChild = node.Right.MaxChild
-        }
-    }
+	// Update min/max child IDs
+	node.MinChild = node.Point.ID
+	node.MaxChild = node.Point.ID
 
-    return node
+	if node.Left != nil {
+		if node.Left.MinChild < node.MinChild {
+			node.MinChild = node.Left.MinChild
+		}
+		if node.Left.MaxChild > node.MaxChild {
+			node.MaxChild = node.Left.MaxChild
+		}
+	}
+	if node.Right != nil {
+		if node.Right.MinChild < node.MinChild {
+			node.MinChild = node.Right.MinChild
+		}
+		if node.Right.MaxChild > node.MaxChild {
+			node.MaxChild = node.Right.MaxChild
+		}
+	}
+
+	return node
 }
 
 // Load initializes the cluster index with points
 func (sc *Supercluster) Load(points []Point) {
-    fmt.Printf("Loading %d points\n", len(points))
-    
-    kdPoints := make([]KDPoint, len(points))
-    for i, p := range points {
-        kdPoints[i] = KDPoint{
-            X:         p.X,
-            Y:         p.Y,
-            ID:        p.ID,
-            NumPoints: 1,
-            Metrics:   p.Metrics,
-        }
-    }
+	fmt.Printf("Loading %d points\n", len(points))
 
-    sc.Points = points
-    sc.Tree = NewKDTree(kdPoints, sc.Options.NodeSize)
-    fmt.Printf("Created KD-tree with %d points\n", len(sc.Tree.Points))
+	kdPoints := make([]KDPoint, len(points))
+	for i, p := range points {
+		kdPoints[i] = KDPoint{
+			X:         p.X,
+			Y:         p.Y,
+			ID:        p.ID,
+			NumPoints: 1,
+			Metrics:   p.Metrics,
+		}
+	}
+
+	sc.Points = points
+	sc.Tree = NewKDTree(kdPoints, sc.Options.NodeSize)
+	fmt.Printf("Created KD-tree with %d points\n", len(sc.Tree.Points))
 }
 
 // rangeSearch finds all points within radius of center
 func (t *KDTree) rangeSearch(center KDPoint, radius float32, zoom int, results *[]KDPoint) {
-    if t.Root == nil {
-        return
-    }
-    t.rangeSearchNode(t.Root, center, radius, zoom, results)
+	if t.Root == nil {
+		return
+	}
+	t.rangeSearchNode(t.Root, center, radius, zoom, results)
 }
 
 func (t *KDTree) rangeSearchNode(node *KDNode, center KDPoint, radius float32, zoom int, results *[]KDPoint) {
-    if node == nil {
-        return
-    }
+	if node == nil {
+		return
+	}
 
-    // Calculate distance in projected space
-    dx := node.Point.X - center.X
-    dy := node.Point.Y - center.Y
-    dist2 := dx*dx + dy*dy // squared distance
-    radius2 := radius * radius // squared radius
+	// Calculate distance in projected space
+	dx := node.Point.X - center.X
+	dy := node.Point.Y - center.Y
+	dist2 := dx*dx + dy*dy     // squared distance
+	radius2 := radius * radius // squared radius
 
-    // If point is within radius, add it
-    if dist2 <= radius2 {
-        *results = append(*results, node.Point)
-    }
+	// If point is within radius, add it
+	if dist2 <= radius2 {
+		*results = append(*results, node.Point)
+	}
 
-    // Check which child nodes need to be searched
-    var splitDist float32
-    if node.Axis == 0 {
-        splitDist = center.X - node.Point.X
-    } else {
-        splitDist = center.Y - node.Point.Y
-    }
+	// Check which child nodes need to be searched
+	var splitDist float32
+	if node.Axis == 0 {
+		splitDist = center.X - node.Point.X
+	} else {
+		splitDist = center.Y - node.Point.Y
+	}
 
-    // Search child nodes if they could contain points within the radius
-    split2 := splitDist * splitDist
-    if split2 <= radius2 { // if the splitting plane is within radius
-        // Search both children
-        t.rangeSearchNode(node.Left, center, radius, zoom, results)
-        t.rangeSearchNode(node.Right, center, radius, zoom, results)
-    } else {
-        // Only search the side of the split that the center is on
-        if splitDist <= 0 {
-            t.rangeSearchNode(node.Left, center, radius, zoom, results)
-        } else {
-            t.rangeSearchNode(node.Right, center, radius, zoom, results)
-        }
-    }
+	// Search child nodes if they could contain points within the radius
+	split2 := splitDist * splitDist
+	if split2 <= radius2 { // if the splitting plane is within radius
+		// Search both children
+		t.rangeSearchNode(node.Left, center, radius, zoom, results)
+		t.rangeSearchNode(node.Right, center, radius, zoom, results)
+	} else {
+		// Only search the side of the split that the center is on
+		if splitDist <= 0 {
+			t.rangeSearchNode(node.Left, center, radius, zoom, results)
+		} else {
+			t.rangeSearchNode(node.Right, center, radius, zoom, results)
+		}
+	}
 }
 
 // GetClusters returns clusters for the given bounds and zoom level
 func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
-    fmt.Printf("Getting clusters for zoom level %d\n", zoom)
-    fmt.Printf("Bounds: MinX: %f, MinY: %f, MaxX: %f, MaxY: %f\n", 
-        bounds.MinX, bounds.MinY, bounds.MaxX, bounds.MaxY)
-    fmt.Printf("Total points in tree: %d\n", len(sc.Tree.Points))
+	fmt.Printf("Getting clusters for zoom level %d\n", zoom)
+	fmt.Printf("Bounds: MinX: %f, MinY: %f, MaxX: %f, MaxY: %f\n",
+		bounds.MinX, bounds.MinY, bounds.MaxX, bounds.MaxY)
+	fmt.Printf("Total points in tree: %d\n", len(sc.Tree.Points))
 
-    // Project bounds to tile space for current zoom level
-    minP := sc.projectFast(bounds.MinX, bounds.MaxY, zoom)
-    maxP := sc.projectFast(bounds.MaxX, bounds.MinY, zoom)
-    
-    fmt.Printf("Projected bounds: Min(%f,%f) Max(%f,%f)\n", 
-        minP[0], minP[1], maxP[0], maxP[1])
+	// Project bounds to tile space for current zoom level
+	minP := sc.projectFast(bounds.MinX, bounds.MaxY, zoom)
+	maxP := sc.projectFast(bounds.MaxX, bounds.MinY, zoom)
 
-    // Get all points in the bounds
-    var points []KDPoint
-    for _, p := range sc.Tree.Points {
-        // Project point to current zoom level
-        proj := sc.projectFast(p.X, p.Y, zoom)
-        
-        // Check if point is within bounds
-        if proj[0] >= minP[0] && proj[0] <= maxP[0] &&
-           proj[1] >= minP[1] && proj[1] <= maxP[1] {
-            points = append(points, p)
-        }
-    }
-    
-    fmt.Printf("Found %d points within bounds\n", len(points))
+	fmt.Printf("Projected bounds: Min(%f,%f) Max(%f,%f)\n",
+		minP[0], minP[1], maxP[0], maxP[1])
 
-    // Calculate clustering radius for this zoom level
-    zoomFactor := math.Pow(2, float64(sc.Options.MaxZoom-zoom))
-    radius := float32(sc.Options.Radius * zoomFactor / float64(sc.Options.Extent))
-    
-    fmt.Printf("Clustering radius: %f\n", radius)
+	// Get all points in the bounds
+	var points []KDPoint
+	for _, p := range sc.Tree.Points {
+		// Project point to current zoom level
+		proj := sc.projectFast(p.X, p.Y, zoom)
 
-    // Cluster the points using projected coordinates
-    var projectedPoints []KDPoint
-    for _, p := range points {
-        proj := sc.projectFast(p.X, p.Y, zoom)
-        projectedPoints = append(projectedPoints, KDPoint{
-            X:         proj[0],
-            Y:         proj[1],
-            ID:        p.ID,
-            NumPoints: p.NumPoints,
-            Metrics:   p.Metrics,
-        })
-    }
+		// Check if point is within bounds
+		if proj[0] >= minP[0] && proj[0] <= maxP[0] &&
+			proj[1] >= minP[1] && proj[1] <= maxP[1] {
+			points = append(points, p)
+		}
+	}
 
-    // Cluster the projected points
-    clusters := sc.clusterPoints(projectedPoints, radius)
-    fmt.Printf("Created %d clusters\n", len(clusters))
+	fmt.Printf("Found %d points within bounds\n", len(points))
 
-    // Convert cluster coordinates back to lng/lat
-    for i := range clusters {
-        unproj := sc.unprojectFast(clusters[i].X, clusters[i].Y, zoom)
-        clusters[i].X = unproj[0]
-        clusters[i].Y = unproj[1]
-    }
-    
-    return clusters
+	// Calculate clustering radius for this zoom level
+	zoomFactor := math.Pow(2, float64(sc.Options.MaxZoom-zoom))
+	radius := float32(sc.Options.Radius * zoomFactor / float64(sc.Options.Extent))
+
+	fmt.Printf("Clustering radius: %f\n", radius)
+
+	// Cluster the points using projected coordinates
+	var projectedPoints []KDPoint
+	for _, p := range points {
+		proj := sc.projectFast(p.X, p.Y, zoom)
+		projectedPoints = append(projectedPoints, KDPoint{
+			X:         proj[0],
+			Y:         proj[1],
+			ID:        p.ID,
+			NumPoints: p.NumPoints,
+			Metrics:   p.Metrics,
+		})
+	}
+
+	// Cluster the projected points
+	clusters := sc.clusterPoints(projectedPoints, radius)
+	fmt.Printf("Created %d clusters\n", len(clusters))
+
+	// Convert cluster coordinates back to lng/lat
+	for i := range clusters {
+		unproj := sc.unprojectFast(clusters[i].X, clusters[i].Y, zoom)
+		clusters[i].X = unproj[0]
+		clusters[i].Y = unproj[1]
+	}
+
+	return clusters
 }
 func (sc *Supercluster) clusterPoints(points []KDPoint, radius float32) []ClusterNode {
-    fmt.Printf("Clustering %d points with radius %f\n", len(points), radius)
-    
-    var clusters []ClusterNode
-    processed := make(map[uint32]bool)
+	fmt.Printf("Clustering %d points with radius %f\n", len(points), radius)
 
-    for _, p := range points {
-        if processed[p.ID] {
-            continue
-        }
+	var clusters []ClusterNode
+	processed := make(map[uint32]bool)
 
-        // Find nearby points
-        var nearby []KDPoint
-        for _, other := range points {
-            if other.ID == p.ID {
-                continue
-            }
-            
-            dx := other.X - p.X
-            dy := other.Y - p.Y
-            if dx*dx + dy*dy <= radius*radius {
-                nearby = append(nearby, other)
-            }
-        }
+	for _, p := range points {
+		if processed[p.ID] {
+			continue
+		}
 
-        fmt.Printf("Point %d has %d nearby points\n", p.ID, len(nearby))
+		// Find nearby points
+		var nearby []KDPoint
+		for _, other := range points {
+			if other.ID == p.ID {
+				continue
+			}
 
-        // If we have enough points, create a cluster
-        if len(nearby) >= sc.Options.MinPoints {
-            cluster := createCluster(append(nearby, p))
-            clusters = append(clusters, cluster)
-            
-            // Mark points as processed
-            for _, np := range nearby {
-                processed[np.ID] = true
-            }
-            processed[p.ID] = true
-        } else {
-            // Add as individual point
-            clusters = append(clusters, ClusterNode{
-                ID:      p.ID,
-                X:      p.X,
-                Y:      p.Y,
-                Count:  1,
-                Metrics: ClusterMetrics{Values: p.Metrics},
-            })
-            processed[p.ID] = true
-        }
-    }
+			dx := other.X - p.X
+			dy := other.Y - p.Y
+			if dx*dx+dy*dy <= radius*radius {
+				nearby = append(nearby, other)
+			}
+		}
 
-    fmt.Printf("Created %d clusters from %d points\n", len(clusters), len(points))
-    return clusters
+		fmt.Printf("Point %d has %d nearby points\n", p.ID, len(nearby))
+
+		// If we have enough points, create a cluster
+		if len(nearby) >= sc.Options.MinPoints {
+			cluster := createCluster(append(nearby, p))
+			clusters = append(clusters, cluster)
+
+			// Mark points as processed
+			for _, np := range nearby {
+				processed[np.ID] = true
+			}
+			processed[p.ID] = true
+		} else {
+			// Add as individual point
+			clusters = append(clusters, ClusterNode{
+				ID:      p.ID,
+				X:       p.X,
+				Y:       p.Y,
+				Count:   1,
+				Metrics: ClusterMetrics{Values: p.Metrics},
+			})
+			processed[p.ID] = true
+		}
+	}
+
+	fmt.Printf("Created %d clusters from %d points\n", len(clusters), len(points))
+	return clusters
 }
 
 func createCluster(points []KDPoint) ClusterNode {
-    var sumX, sumY float64
-    metrics := make(map[string]float64)
-    var totalPoints uint32
+	var sumX, sumY float64
+	metrics := make(map[string]float64)
+	var totalPoints uint32
 
-    // Accumulate values
-    for _, p := range points {
-        weight := float64(p.NumPoints)
-        sumX += float64(p.X) * weight
-        sumY += float64(p.Y) * weight
-        totalPoints += p.NumPoints
+	// Accumulate values
+	for _, p := range points {
+		weight := float64(p.NumPoints)
+		sumX += float64(p.X) * weight
+		sumY += float64(p.Y) * weight
+		totalPoints += p.NumPoints
 
-        for k, v := range p.Metrics {
-            metrics[k] += float64(v) * weight
-        }
-    }
+		for k, v := range p.Metrics {
+			metrics[k] += float64(v) * weight
+		}
+	}
 
-    // Calculate averages
-    invTotal := 1.0 / float64(totalPoints)
-    cluster := ClusterNode{
-        ID:    uuid.New().ID(),
-        X:     float32(sumX * invTotal),
-        Y:     float32(sumY * invTotal),
-        Count: totalPoints,
-        Metrics: ClusterMetrics{
-            Values: make(map[string]float32),
-        },
-    }
+	// Calculate averages
+	invTotal := 1.0 / float64(totalPoints)
+	cluster := ClusterNode{
+		ID:    uuid.New().ID(),
+		X:     float32(sumX * invTotal),
+		Y:     float32(sumY * invTotal),
+		Count: totalPoints,
+		Metrics: ClusterMetrics{
+			Values: make(map[string]float32),
+		},
+	}
 
-    // Average metrics
-    for k, sum := range metrics {
-        cluster.Metrics.Values[k] = float32(sum * invTotal)
-    }
+	// Average metrics
+	for k, sum := range metrics {
+		cluster.Metrics.Values[k] = float32(sum * invTotal)
+	}
 
-    return cluster
+	return cluster
 }
 
 // Add necessary existing types and helper functions
 type Point struct {
-    ID       uint32
-    X, Y     float32
-    Metrics  map[string]float32
-    Metadata map[string]interface{}
+	ID       uint32
+	X, Y     float32
+	Metrics  map[string]float32
+	Metadata map[string]interface{}
 }
 
 type KDPoint struct {
-    X, Y      float32
-    ID        uint32
-    ParentID  uint32
-    NumPoints uint32
-    Metrics   map[string]float32
+	X, Y      float32
+	ID        uint32
+	ParentID  uint32
+	NumPoints uint32
+	Metrics   map[string]float32
 }
 
 type ClusterNode struct {
-    ID       uint32
-    X, Y     float32
-    Count    uint32
-    Children []uint32
-    Metrics  ClusterMetrics
-    Metadata map[string]json.RawMessage
+	ID       uint32
+	X, Y     float32
+	Count    uint32
+	Children []uint32
+	Metrics  ClusterMetrics
+	Metadata map[string]json.RawMessage
 }
 
 type ClusterMetrics struct {
-    Values map[string]float32
+	Values map[string]float32
 }
 
 type KDBounds struct {
-    MinX, MinY, MaxX, MaxY float32
+	MinX, MinY, MaxX, MaxY float32
 }
 
 // Extend expands bounds to include another point
 func (b *KDBounds) Extend(x, y float32) {
-    b.MinX = float32(math.Min(float64(b.MinX), float64(x)))
-    b.MinY = float32(math.Min(float64(b.MinY), float64(y)))
-    b.MaxX = float32(math.Max(float64(b.MaxX), float64(x)))
-    b.MaxY = float32(math.Max(float64(b.MaxY), float64(y)))
+	b.MinX = float32(math.Min(float64(b.MinX), float64(x)))
+	b.MinY = float32(math.Min(float64(b.MinY), float64(y)))
+	b.MaxX = float32(math.Max(float64(b.MaxX), float64(x)))
+	b.MaxY = float32(math.Max(float64(b.MaxY), float64(y)))
 }
 
 // Project functions are needed for GetClusters
 // projectFast converts lng/lat to tile coordinates
 func (sc *Supercluster) projectFast(lng, lat float32, zoom int) [2]float32 {
-    sin := float32(math.Sin(float64(lat) * math.Pi / 180))
-    x := (lng + 180) / 360
-    y := float32(0.5 - 0.25*math.Log(float64((1+sin)/(1-sin)))/math.Pi)
+	sin := float32(math.Sin(float64(lat) * math.Pi / 180))
+	x := (lng + 180) / 360
+	y := float32(0.5 - 0.25*math.Log(float64((1+sin)/(1-sin)))/math.Pi)
 
-    scale := float32(math.Pow(2, float64(zoom)))
-    return [2]float32{
-        x * scale * float32(sc.Options.Extent),
-        y * scale * float32(sc.Options.Extent),
-    }
+	scale := float32(math.Pow(2, float64(zoom)))
+	return [2]float32{
+		x * scale * float32(sc.Options.Extent),
+		y * scale * float32(sc.Options.Extent),
+	}
 }
 
 // unprojectFast converts tile coordinates back to lng/lat
 func (sc *Supercluster) unprojectFast(x, y float32, zoom int) [2]float32 {
-    scale := float32(math.Pow(2, float64(zoom)))
-    
-    // Convert to normalized coordinates
-    x = x / (scale * float32(sc.Options.Extent))
-    y = y / (scale * float32(sc.Options.Extent))
+	scale := float32(math.Pow(2, float64(zoom)))
 
-    // Convert to lng/lat
-    lng := x*360 - 180
-    lat := float32(math.Atan(math.Sinh(float64(math.Pi * (1 - 2*y))))) * 180 / math.Pi
+	// Convert to normalized coordinates
+	x = x / (scale * float32(sc.Options.Extent))
+	y = y / (scale * float32(sc.Options.Extent))
 
-    return [2]float32{lng, lat}
+	// Convert to lng/lat
+	lng := x*360 - 180
+	lat := float32(math.Atan(math.Sinh(float64(math.Pi*(1-2*y))))) * 180 / math.Pi
+
+	return [2]float32{lng, lat}
+}
+
+// SaveCompressed saves the KDTree to a zstd compressed file
+func (t *KDTree) SaveCompressed(filename string) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %v", err)
+	}
+	defer file.Close()
+
+	// Create zstd writer
+	enc, err := zstd.NewWriter(file)
+	if err != nil {
+		return fmt.Errorf("failed to create zstd writer: %v", err)
+	}
+	defer enc.Close()
+
+	// Create gob encoder
+	gobEnc := gob.NewEncoder(enc)
+
+	serialTree := struct {
+		Points   []KDPoint
+		NodeSize int
+		Bounds   KDBounds
+		Root     *KDNode
+	}{
+		Points:   t.Points,
+		NodeSize: t.NodeSize,
+		Bounds:   t.Bounds,
+		Root:     t.Root,
+	}
+
+	if err := gobEnc.Encode(serialTree); err != nil {
+		return fmt.Errorf("failed to encode tree: %v", err)
+	}
+
+	return nil
+}
+
+// LoadCompressed loads a KDTree from a zstd compressed file
+func LoadCompressedKDTree(filename string) (*KDTree, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %v", err)
+	}
+	defer file.Close()
+
+	// Create zstd reader
+	dec, err := zstd.NewReader(file)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create zstd reader: %v", err)
+	}
+	defer dec.Close()
+
+	// Create gob decoder
+	gobDec := gob.NewDecoder(dec)
+
+	var serialTree struct {
+		Points   []KDPoint
+		NodeSize int
+		Bounds   KDBounds
+		Root     *KDNode
+	}
+
+	if err := gobDec.Decode(&serialTree); err != nil {
+		return nil, fmt.Errorf("failed to decode tree: %v", err)
+	}
+
+	return &KDTree{
+		Points:   serialTree.Points,
+		NodeSize: serialTree.NodeSize,
+		Bounds:   serialTree.Bounds,
+		Root:     serialTree.Root,
+	}, nil
+}
+
+// SaveCompressed saves the Supercluster to a zstd compressed file
+func (sc *Supercluster) SaveCompressed(filename string) error {
+	fmt.Printf("Attempting to save cluster to %s\n", filename)
+	// Create the file
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %v", err)
+	}
+	defer file.Close()
+
+	// Create zstd writer
+	enc, err := zstd.NewWriter(file)
+	if err != nil {
+		return fmt.Errorf("failed to create zstd writer: %v", err)
+	}
+	defer enc.Close()
+
+	// Create encoder
+	gobEnc := gob.NewEncoder(enc)
+
+	// Create a serializable version of the supercluster
+	serialCluster := struct {
+		Tree    *KDTree
+		Points  []Point
+		Options SuperclusterOptions
+	}{
+		Tree:    sc.Tree,
+		Points:  sc.Points,
+		Options: sc.Options,
+	}
+
+	fmt.Printf("Serializing cluster with %d points\n", len(serialCluster.Points))
+
+	// Encode the cluster
+	if err := gobEnc.Encode(serialCluster); err != nil {
+		return fmt.Errorf("failed to encode cluster: %v", err)
+	}
+
+	// Verify file was written
+	if info, err := os.Stat(filename); err == nil {
+		fmt.Printf("Successfully wrote cluster file: %s (size: %d bytes)\n", filename, info.Size())
+	} else {
+		fmt.Printf("Error verifying saved file: %v\n", err)
+	}
+
+	return nil
+}
+
+// LoadCompressed loads a Supercluster from a zstd compressed file
+func LoadCompressedSupercluster(filename string) (*Supercluster, error) {
+	// Open the file
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %v", err)
+	}
+	defer file.Close()
+
+	// Create zstd reader
+	dec, err := zstd.NewReader(file)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create zstd reader: %v", err)
+	}
+	defer dec.Close()
+
+	// Create decoder
+	gobDec := gob.NewDecoder(dec)
+
+	// Create a serializable version of the supercluster
+	var serialCluster struct {
+		Tree    *KDTree
+		Points  []Point
+		Options SuperclusterOptions
+	}
+
+	// Decode the cluster
+	if err := gobDec.Decode(&serialCluster); err != nil {
+		return nil, fmt.Errorf("failed to decode cluster: %v", err)
+	}
+
+	// Create and return the supercluster
+	cluster := &Supercluster{
+		Tree:    serialCluster.Tree,
+		Points:  serialCluster.Points,
+		Options: serialCluster.Options,
+	}
+
+	return cluster, nil
 }

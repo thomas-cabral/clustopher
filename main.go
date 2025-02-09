@@ -1,19 +1,33 @@
 package main
 
 import (
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net/http"
 	"os"
-	"runtime"
+	"os/signal"
+	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"web/clustopher/cluster"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
+
+func init() {
+	// Register types for gob encoding/decoding
+	gob.Register(time.Time{})
+	gob.Register([]string{})
+}
+
+const CLUSTER_SAVE_DIR = "data/clusters"
 
 // Example usage
 func ExportClustersToFile(filename string) error {
@@ -64,76 +78,264 @@ type ClusterServer struct {
 	cluster *cluster.Supercluster
 }
 
+func formatFileSize(size int64) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	div, exp := int64(unit), 0
+	for n := size / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
+}
+
+func generateClusterFilename(size int) string {
+	timestamp := time.Now().Format("20060102-150405")
+	id := uuid.New().String()[:8] // Use first 8 chars of UUID for brevity
+	return filepath.Join(CLUSTER_SAVE_DIR, fmt.Sprintf("cluster-%dp-%s-%s.zst", size, timestamp, id))
+}
+
+func findLatestClusterFile() (string, error) {
+	files, err := os.ReadDir(CLUSTER_SAVE_DIR)
+	if err != nil {
+		return "", err
+	}
+
+	var latest string
+	var latestTime time.Time
+
+	for _, file := range files {
+		if !file.IsDir() && filepath.Ext(file.Name()) == ".zst" {
+			info, err := file.Info()
+			if err != nil {
+				continue
+			}
+			if latest == "" || info.ModTime().After(latestTime) {
+				latest = filepath.Join(CLUSTER_SAVE_DIR, file.Name())
+				latestTime = info.ModTime()
+			}
+		}
+	}
+
+	if latest == "" {
+		return "", fmt.Errorf("no cluster files found")
+	}
+	return latest, nil
+}
+
 func NewClusterServer(numPoints int) *ClusterServer {
-	// Use the existing point generation code
-	bounds := cluster.KDBounds{
-		MinX: -125.0, // Roughly West Coast of US
-		MinY: 25.0,   // Roughly Southern US border
-		MaxX: -67.0,  // Roughly East Coast of US
-		MaxY: 49.0,   // Roughly Northern US border
+	fmt.Printf("\n=== Starting NewClusterServer with %d points ===\n", numPoints)
+	// Create clusters directory if it doesn't exist
+	if err := os.MkdirAll(CLUSTER_SAVE_DIR, 0755); err != nil {
+		fmt.Printf("Failed to create clusters directory: %v\n", err)
 	}
 
-	fmt.Printf("Generating %d points in the Continental US...\n", numPoints)
-	points := generateTestPoints(numPoints, bounds)
+	// If we're creating a new cluster, don't try to load existing
+	if numPoints > 0 {
+		fmt.Printf("Generating new cluster with %d points...\n", numPoints)
+		// Use the existing point generation code
+		bounds := cluster.KDBounds{
+			MinX: -125.0,
+			MinY: 25.0,
+			MaxX: -67.0,
+			MaxY: 49.0,
+		}
 
-	options := cluster.SuperclusterOptions{
-		MinZoom:   0,
-		MaxZoom:   16,
-		MinPoints: 2,
-		Radius:    100,
-		Extent:    512,
-		NodeSize:  64,
-		Log:       true,
+		fmt.Printf("Generating points in the Continental US...\n")
+		points := generateTestPoints(numPoints, bounds)
+
+		options := cluster.SuperclusterOptions{
+			MinZoom:   0,
+			MaxZoom:   16,
+			MinPoints: 2,
+			Radius:    100,
+			Extent:    512,
+			NodeSize:  64,
+			Log:       true,
+		}
+
+		fmt.Printf("Creating new supercluster...\n")
+		supercluster := cluster.NewSupercluster(options)
+		supercluster.Load(points)
+
+		// Save the cluster after loading with new filename format
+		savePath := generateClusterFilename(numPoints)
+		fmt.Printf("Saving new cluster to %s...\n", savePath)
+		if err := supercluster.SaveCompressed(savePath); err != nil {
+			fmt.Printf("ERROR: Failed to save cluster: %v\n", err)
+		} else {
+			fmt.Printf("Successfully saved new cluster\n")
+		}
+
+		fmt.Printf("=== Finished creating new cluster ===\n")
+		return &ClusterServer{
+			cluster: supercluster,
+		}
 	}
 
-	fmt.Printf("Initializing supercluster with options: %+v\n", options)
-	cluster := cluster.NewSupercluster(options)
-
-	// Memory profiling before loading points
-	var memStatsBefore runtime.MemStats
-	runtime.ReadMemStats(&memStatsBefore)
-
-	fmt.Println("Loading points into cluster...")
-	loadStart := time.Now()
-	cluster.Load(points)
-	loadDuration := time.Since(loadStart)
-	fmt.Printf("Points loaded in %v\n", loadDuration)
-
-	// Memory profiling after loading points
-	var memStatsAfter runtime.MemStats
-	runtime.ReadMemStats(&memStatsAfter)
-
-	// Calculate memory usage
-	memAllocated := memStatsAfter.Alloc - memStatsBefore.Alloc
-	memSys := memStatsAfter.Sys - memStatsBefore.Sys
-	numGC := memStatsAfter.NumGC - memStatsBefore.NumGC
-
-	fmt.Printf("Memory Usage Stats:\n")
-	fmt.Printf("  Allocated Memory: %v bytes\n", memAllocated)
-	fmt.Printf("  System Memory: %v bytes\n", memSys)
-	fmt.Printf("  Number of GC: %v\n", numGC)
-
-	return &ClusterServer{
-		cluster: cluster,
+	// Try to load existing cluster
+	if latestFile, err := findLatestClusterFile(); err == nil {
+		loadStart := time.Now()
+		if cluster, err := cluster.LoadCompressedSupercluster(latestFile); err == nil {
+			loadDuration := time.Since(loadStart)
+			fileInfo, _ := os.Stat(latestFile)
+			fmt.Printf("Loaded existing cluster from %s (file size: %s) in %v\n",
+				latestFile, formatFileSize(fileInfo.Size()), loadDuration)
+			return &ClusterServer{
+				cluster: cluster,
+			}
+		} else {
+			fmt.Printf("Could not load existing cluster (%v)\n", err)
+		}
+	} else {
+		fmt.Printf("No existing cluster found in %s\n", CLUSTER_SAVE_DIR)
 	}
+
+	return nil // Return nil if no cluster was loaded
+}
+
+// Add this new type for cluster info
+type ClusterInfo struct {
+	ID        string    `json:"id"`
+	NumPoints int       `json:"numPoints"`
+	Timestamp time.Time `json:"timestamp"`
+	FileSize  int64     `json:"fileSize"`
+}
+
+// Add these new handler functions
+func (s *ClusterServer) listClusters() ([]ClusterInfo, error) {
+	absPath, err := filepath.Abs(CLUSTER_SAVE_DIR)
+	fmt.Printf("\n=== Listing clusters ===\n")
+	fmt.Printf("Looking for clusters in absolute path: %s\n", absPath)
+
+	// List all files in directory
+	if files, err := os.ReadDir(CLUSTER_SAVE_DIR); err == nil {
+		fmt.Printf("All files in directory:\n")
+		for _, f := range files {
+			fmt.Printf("  - %s\n", f.Name())
+		}
+	}
+
+	files, err := os.ReadDir(CLUSTER_SAVE_DIR)
+	if err != nil {
+		fmt.Printf("Error reading directory %s: %v\n", CLUSTER_SAVE_DIR, err)
+		return nil, err
+	}
+
+	fmt.Printf("Found %d files in %s\n", len(files), CLUSTER_SAVE_DIR)
+	clusters := make([]ClusterInfo, 0)
+	for _, file := range files {
+		fmt.Printf("Processing file: %s\n", file.Name())
+		if !file.IsDir() && filepath.Ext(file.Name()) == ".zst" {
+			info, err := file.Info()
+			if err != nil {
+				fmt.Printf("Error getting file info for %s: %v\n", file.Name(), err)
+				continue
+			}
+
+			// Parse filename to get cluster info
+			// Format: cluster-{numPoints}p-{timestamp}-{id}.zst
+			name := strings.TrimSuffix(file.Name(), ".zst")
+			parts := strings.Split(name, "-")
+			fmt.Printf("Filename parts: %v\n", parts)
+			if len(parts) != 5 {
+				fmt.Printf("Invalid filename format for %s\n", name)
+				continue
+			}
+
+			numPoints, err := strconv.Atoi(strings.TrimSuffix(parts[1], "p"))
+			if err != nil {
+				fmt.Printf("Error parsing numPoints from %s: %v\n", parts[1], err)
+				continue
+			}
+
+			timestamp, err := time.Parse("20060102-150405", parts[2]+"-"+parts[3])
+			if err != nil {
+				fmt.Printf("Error parsing timestamp from %s: %v\n", parts[2], err)
+				continue
+			}
+
+			fmt.Printf("Adding cluster: ID=%s, Points=%d, Time=%v, Size=%d\n",
+				parts[4], numPoints, timestamp, info.Size())
+			clusters = append(clusters, ClusterInfo{
+				ID:        parts[4],
+				NumPoints: numPoints,
+				Timestamp: timestamp,
+				FileSize:  info.Size(),
+			})
+		}
+	}
+
+	fmt.Printf("Returning %d clusters\n", len(clusters))
+	// Sort by timestamp descending
+	sort.Slice(clusters, func(i, j int) bool {
+		return clusters[i].Timestamp.After(clusters[j].Timestamp)
+	})
+
+	return clusters, nil
+}
+
+func (s *ClusterServer) loadClusterById(id string) error {
+	files, err := os.ReadDir(CLUSTER_SAVE_DIR)
+	if err != nil {
+		return err
+	}
+
+	// Find the file with matching ID
+	var clusterFile string
+	for _, file := range files {
+		if strings.Contains(file.Name(), id) {
+			clusterFile = filepath.Join(CLUSTER_SAVE_DIR, file.Name())
+			break
+		}
+	}
+
+	if clusterFile == "" {
+		return fmt.Errorf("cluster with ID %s not found", id)
+	}
+
+	// Load the cluster
+	loadedCluster, err := cluster.LoadCompressedSupercluster(clusterFile)
+	if err != nil {
+		return fmt.Errorf("failed to load cluster: %v", err)
+	}
+
+	s.cluster = loadedCluster
+	return nil
 }
 
 func main() {
-	// Allow configuring number of points via environment variable or default to 10000
-	numPoints := 10000000
+	// Ensure cluster directory exists with correct permissions
+	absPath, _ := filepath.Abs(CLUSTER_SAVE_DIR)
+	fmt.Printf("Ensuring cluster directory exists: %s\n", absPath)
+	if err := os.MkdirAll(CLUSTER_SAVE_DIR, 0755); err != nil {
+		fmt.Printf("Error creating cluster directory: %v\n", err)
+	}
+	if info, err := os.Stat(CLUSTER_SAVE_DIR); err == nil {
+		fmt.Printf("Cluster directory exists with permissions: %v\n", info.Mode())
+	} else {
+		fmt.Printf("Error checking cluster directory: %v\n", err)
+	}
 
 	fmt.Println("Starting NewClusterServer...")
 	start := time.Now()
-	server := NewClusterServer(numPoints)
+	server := NewClusterServer(0) // Pass 0 to only try loading existing cluster
 	duration := time.Since(start)
 	fmt.Printf("NewClusterServer initialized in %v\n", duration)
+
+	if server == nil {
+		// No existing cluster found, create empty server
+		server = &ClusterServer{}
+	}
 
 	r := gin.Default()
 
 	// Enable CORS
 	r.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type")
 
 		if c.Request.Method == "OPTIONS" {
@@ -217,37 +419,128 @@ func main() {
 		c.JSON(http.StatusOK, geojson)
 	})
 
+	// List available clusters
+	r.GET("/api/clusters/list", func(c *gin.Context) {
+		clusters, err := server.listClusters()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, clusters)
+	})
+
+	// Create new cluster
+	r.POST("/api/clusters", func(c *gin.Context) {
+		var req struct {
+			NumPoints int `json:"numPoints"`
+		}
+		fmt.Printf("\n=== Received request to create new cluster ===\n")
+		if err := c.BindJSON(&req); err != nil {
+			fmt.Printf("ERROR: Failed to parse request: %v\n", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+			return
+		}
+
+		fmt.Printf("Creating new cluster with %d points\n", req.NumPoints)
+		oldServer := server // Keep reference to old server
+		newServer := NewClusterServer(req.NumPoints)
+		if newServer == nil {
+			fmt.Printf("ERROR: Failed to create new cluster server\n")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create cluster"})
+			return
+		}
+
+		// Update the global server variable
+		server = newServer
+
+		// Clean up old server if needed
+		if oldServer != nil && oldServer.cluster != nil {
+			fmt.Printf("Cleaned up old server\n")
+		}
+
+		// Verify the new server
+		if server.cluster == nil {
+			fmt.Printf("ERROR: New server has nil cluster\n")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initialize cluster"})
+			return
+		}
+
+		fmt.Printf("New cluster created successfully\n")
+		c.JSON(http.StatusOK, gin.H{"message": "New cluster created"})
+	})
+
+	// Add this to your main() function where the other routes are
+	r.POST("/api/clusters/load/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		if err := server.loadClusterById(id); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "Cluster loaded successfully"})
+	})
+
 	// Get statistics about the current clustering
-// 	r.GET("/api/stats", func(c *gin.Context) {
-// 		stats := map[string]interface{}{
-// 			"total_points": len(server.cluster.Points),
-// 			"options":      server.cluster.Options,
-// 			"zoom_levels":  map[int]int{},
-// 		}
+	// 	r.GET("/api/stats", func(c *gin.Context) {
+	// 		stats := map[string]interface{}{
+	// 			"total_points": len(server.cluster.Points),
+	// 			"options":      server.cluster.Options,
+	// 			"zoom_levels":  map[int]int{},
+	// 		}
 
-// 		// Count points at each zoom level
-// 		for zoom, tree := range server.cluster.Tree {
-// 			if tree != nil {
-// 				stats["zoom_levels"].(map[int]int)[zoom] = len(tree.Points)
-// 			}
-// 		}
+	// 		// Count points at each zoom level
+	// 		for zoom, tree := range server.cluster.Tree {
+	// 			if tree != nil {
+	// 				stats["zoom_levels"].(map[int]int)[zoom] = len(tree.Points)
+	// 			}
+	// 		}
 
-// 		// Get current memory stats
-// 		var memStats runtime.MemStats
-// 		runtime.ReadMemStats(&memStats)
+	// 		// Get current memory stats
+	// 		var memStats runtime.MemStats
+	// 		runtime.ReadMemStats(&memStats)
 
-// 		stats["memory"] = map[string]interface{}{
-// 			"Alloc":      memStats.Alloc,
-// 			"TotalAlloc": memStats.TotalAlloc,
-// 			"Sys":        memStats.Sys,
-// 			"NumGC":      memStats.NumGC,
-// 		}
+	// 		stats["memory"] = map[string]interface{}{
+	// 			"Alloc":      memStats.Alloc,
+	// 			"TotalAlloc": memStats.TotalAlloc,
+	// 			"Sys":        memStats.Sys,
+	// 			"NumGC":      memStats.NumGC,
+	// 		}
 
-// 		c.JSON(http.StatusOK, stats)
-// 	})
+	// 		c.JSON(http.StatusOK, stats)
+	// 	})
 
-	fmt.Println("Starting server on :8080...")
-	r.Run(":8000")
+	// Create a channel to listen for interrupt signals
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+
+	// Start server in a goroutine
+	go func() {
+		fmt.Println("Starting server on :8000...")
+		if err := r.Run(":8000"); err != nil {
+			fmt.Printf("Server error: %v\n", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	<-quit
+	fmt.Println("\nShutting down server...")
+
+	// Save cluster before shutting down with new filename format
+	savePath := generateClusterFilename(len(server.cluster.Points))
+	fmt.Printf("Saving cluster to %s...\n", savePath)
+	saveStart := time.Now()
+	if err := server.cluster.SaveCompressed(savePath); err != nil {
+		fmt.Printf("Failed to save cluster on shutdown: %v\n", err)
+	} else {
+		saveDuration := time.Since(saveStart)
+		if fileInfo, err := os.Stat(savePath); err == nil {
+			fmt.Printf("Cluster saved successfully in %v (file size: %s)\n",
+				saveDuration, formatFileSize(fileInfo.Size()))
+		} else {
+			fmt.Println("Cluster saved successfully")
+		}
+	}
+
+	fmt.Println("Server stopped")
 }
 
 // func min(a, b int) int {

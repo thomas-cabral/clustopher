@@ -11,10 +11,16 @@
     export let width = '800px';
     export let height = '700px';
     export let className = '';
+    export let reloadTrigger = 0;  // Increment this to force reload
   
     let map: mapboxgl.Map;
     let mapContainer: HTMLDivElement;
     let isLoading = false;
+  
+    $: if (reloadTrigger && map) {
+        const bounds = map.getBounds();
+        fetchClusters(bounds, map.getZoom());
+    }
   
     async function fetchClusters(bounds: mapboxgl.LngLatBounds, zoom: number) {
       isLoading = true;
