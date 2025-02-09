@@ -177,10 +177,10 @@ func main() {
 		}
 
 		bounds := cluster.KDBounds{
-			MinX: west,
-			MinY: south,
-			MaxX: east,
-			MaxY: north,
+			MinX: float32(west),
+			MinY: float32(south),
+			MaxX: float32(east),
+			MaxY: float32(north),
 		}
 
 		fmt.Printf("Getting clusters for zoom %d with bounds: %+v\n", zoom, bounds)
@@ -203,7 +203,7 @@ func main() {
 				"type": "Feature",
 				"geometry": map[string]interface{}{
 					"type":        "Point",
-					"coordinates": []float64{cluster.X, cluster.Y},
+					"coordinates": []float64{float64(cluster.X), float64(cluster.Y)},
 				},
 				"properties": properties,
 			}
@@ -263,16 +263,16 @@ func generateTestPoints(n int, bounds cluster.KDBounds) []cluster.Point {
 	points := make([]cluster.Point, n)
 
 	for i := 0; i < n; i++ {
-		x := bounds.MinX + rand.Float64()*(bounds.MaxX-bounds.MinX)
-		y := bounds.MinY + rand.Float64()*(bounds.MaxY-bounds.MinY)
+		x := bounds.MinX + rand.Float32()*(bounds.MaxX-bounds.MinX)
+		y := bounds.MinY + rand.Float32()*(bounds.MaxY-bounds.MinY)
 
 		points[i] = cluster.Point{
 			ID: uint32(i + 1),
 			X:  x,
 			Y:  y,
-			Metrics: map[string]float64{
-				"value": rand.Float64() * 100,
-				"size":  rand.Float64() * 50,
+			Metrics: map[string]float32{
+				"value": rand.Float32() * 100,
+				"size":  rand.Float32() * 50,
 			},
 			Metadata: map[string]interface{}{
 				"timestamp": time.Now().Add(-time.Duration(rand.Intn(7*24)) * time.Hour),

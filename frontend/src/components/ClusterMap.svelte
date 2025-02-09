@@ -9,7 +9,7 @@
     export let initialZoom = 10;
     export let center = [-122.4, 37.8];
     export let width = '800px';
-    export let height = '600px';
+    export let height = '700px';
     export let className = '';
   
     let map: mapboxgl.Map;

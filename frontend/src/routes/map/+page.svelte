@@ -13,7 +13,7 @@
         mapboxToken={MAPBOX_TOKEN}
         apiBaseUrl="http://localhost:8000"
         width="100%"
-        height="500px"
+        height="800px"
         className="custom-map"
         initialZoom={10}
         center={[-122.4, 37.8]}

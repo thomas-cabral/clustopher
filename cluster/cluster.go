@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -14,24 +16,24 @@ const (
 
 // KDBounds represents a bounding box
 type KDBounds struct {
-	MinX, MinY, MaxX, MaxY float64
+	MinX, MinY, MaxX, MaxY float32
 }
 
 // Extend expands bounds to include another point
-func (b *KDBounds) Extend(x, y float64) {
-	b.MinX = math.Min(b.MinX, x)
-	b.MinY = math.Min(b.MinY, y)
-	b.MaxX = math.Max(b.MaxX, x)
-	b.MaxY = math.Max(b.MaxY, y)
+func (b *KDBounds) Extend(x, y float32) {
+	b.MinX = float32(math.Min(float64(b.MinX), float64(x)))
+	b.MinY = float32(math.Min(float64(b.MinY), float64(y)))
+	b.MaxX = float32(math.Max(float64(b.MaxX), float64(x)))
+	b.MaxY = float32(math.Max(float64(b.MaxY), float64(y)))
 }
 
 // KDPoint represents a point in KD-tree
 type KDPoint struct {
-	X, Y      float64
+	X, Y      float32 // Changed from float64 to float32
 	ID        uint32
 	ParentID  uint32
 	NumPoints uint32
-	Metrics   map[string]float64
+	Metrics   map[string]float32 // Changed from float64 to float32
 }
 
 // KDTree implements a KD-tree for spatial indexing
@@ -44,10 +46,10 @@ type KDTree struct {
 // NewKDTree creates a new KD-tree
 func NewKDTree(points []KDPoint, nodeSize int) *KDTree {
 	bounds := KDBounds{
-		MinX: math.Inf(1),
-		MinY: math.Inf(1),
-		MaxX: math.Inf(-1),
-		MaxY: math.Inf(-1),
+		MinX: float32(math.Inf(1)), // Maximum possible value
+		MinY: float32(math.Inf(1)),
+		MaxX: float32(math.Inf(-1)), // Minimum possible value
+		MaxY: float32(math.Inf(-1)),
 	}
 
 	for _, p := range points {
@@ -81,27 +83,26 @@ type SuperclusterOptions struct {
 
 // Point represents a single location with associated data
 type Point struct {
-	ID       uint32                 // Unique identifier
-	X        float64                // Longitude
-	Y        float64                // Latitude
-	Metrics  map[string]float64     // Numerical metrics
-	Metadata map[string]interface{} // Arbitrary metadata
-}
-
-// ClusterMetrics holds calculated metrics for a cluster
-type ClusterMetrics struct {
-	Values map[string]float64 // Map of metric name to value
+	ID       uint32
+	X, Y     float32                // Changed from float64 to float32
+	Metrics  map[string]float32     // Changed from float64 to float32
+	Metadata map[string]interface{} // Consider making this optional or more specific
 }
 
 // ClusterNode represents a node in the cluster hierarchy
 type ClusterNode struct {
 	ID       uint32                     // Unique identifier for the cluster
-	X        float64                    // Longitude of cluster center
-	Y        float64                    // Latitude of cluster center
+	X        float32                    // Longitude of cluster center
+	Y        float32                    // Latitude of cluster center
 	Count    uint32                     // Number of points in this cluster
 	Children []uint32                   // IDs of child clusters
 	Metrics  ClusterMetrics             // Calculated metrics for this cluster
 	Metadata map[string]json.RawMessage // Flexible metadata storage
+}
+
+// ClusterMetrics holds calculated metrics for a cluster
+type ClusterMetrics struct {
+	Values map[string]float32 // Changed from float64 to float32
 }
 
 // GeoJSON structures
@@ -152,14 +153,14 @@ func (n *ClusterNode) UnmarshalJSON(data []byte) error {
 
 	// Extract properties
 	if props := aux.Properties; props != nil {
-		if count, ok := props["point_count"].(float64); ok {
+		if count, ok := props["point_count"].(float32); ok {
 			n.Count = uint32(count)
 		}
 		if metrics, ok := props["metrics"].(map[string]interface{}); ok {
 			for k, v := range metrics {
-				if val, ok := v.(float64); ok {
+				if val, ok := v.(float32); ok {
 					if n.Metrics.Values == nil {
-						n.Metrics.Values = make(map[string]float64)
+						n.Metrics.Values = make(map[string]float32)
 					}
 					n.Metrics.Values[k] = val
 				}
@@ -171,25 +172,25 @@ func (n *ClusterNode) UnmarshalJSON(data []byte) error {
 }
 
 // NewPoint creates a new point with initialized maps
-func NewPoint(id uint32, x, y float64) *Point {
+func NewPoint(id uint32, x, y float32) *Point {
 	return &Point{
 		ID:       id,
 		X:        x,
 		Y:        y,
-		Metrics:  make(map[string]float64),
+		Metrics:  make(map[string]float32),
 		Metadata: make(map[string]interface{}),
 	}
 }
 
 // NewClusterNode creates a new cluster node with initialized maps
-func NewClusterNode(id uint32, x, y float64) *ClusterNode {
+func NewClusterNode(id uint32, x, y float32) *ClusterNode {
 	return &ClusterNode{
 		ID:       id,
 		X:        x,
 		Y:        y,
 		Children: make([]uint32, 0),
 		Metrics: ClusterMetrics{
-			Values: make(map[string]float64),
+			Values: make(map[string]float32),
 		},
 		Metadata: make(map[string]json.RawMessage),
 	}
@@ -201,15 +202,15 @@ func (n *ClusterNode) AddChild(childID uint32) {
 }
 
 // SetMetric sets a metric value for the cluster
-func (n *ClusterNode) SetMetric(name string, value float64) {
+func (n *ClusterNode) SetMetric(name string, value float32) {
 	if n.Metrics.Values == nil {
-		n.Metrics.Values = make(map[string]float64)
+		n.Metrics.Values = make(map[string]float32)
 	}
 	n.Metrics.Values[name] = value
 }
 
 // GetMetric gets a metric value from the cluster
-func (n *ClusterNode) GetMetric(name string) (float64, bool) {
+func (n *ClusterNode) GetMetric(name string) (float32, bool) {
 	if n.Metrics.Values == nil {
 		return 0, false
 	}
@@ -269,7 +270,8 @@ func NewSupercluster(options SuperclusterOptions) *Supercluster {
 
 // Load initializes the cluster index with points
 func (sc *Supercluster) Load(points []Point) {
-	// Convert points to KDPoints
+	fmt.Printf("Initial points: %d\n", len(points))
+
 	kdPoints := make([]KDPoint, len(points))
 	for i, p := range points {
 		kdPoints[i] = KDPoint{
@@ -283,86 +285,201 @@ func (sc *Supercluster) Load(points []Point) {
 
 	sc.Points = points
 
-	// Create KD-trees for each zoom level
+	totalPoints := uint32(len(points))
 	for z := sc.Options.MaxZoom; z >= sc.Options.MinZoom; z-- {
-		// Generate clusters for previous zoom level
 		if z < sc.Options.MaxZoom {
 			kdPoints = sc.clusterPoints(kdPoints, z)
-		}
 
-		// Create KD-tree for current zoom level
+			// Verify point count
+			var count uint32
+			for _, p := range kdPoints {
+				count += p.NumPoints
+			}
+			fmt.Printf("Zoom level %d - Clusters: %d, Total points: %d\n",
+				z, len(kdPoints), count)
+
+			if count != totalPoints {
+				fmt.Printf("WARNING: Lost points at zoom %d (expected %d, got %d)\n",
+					z, totalPoints, count)
+			}
+		}
 		sc.Trees[z] = NewKDTree(kdPoints, sc.Options.NodeSize)
 	}
 }
 
 // clusterPoints clusters points for a given zoom level
 func (sc *Supercluster) clusterPoints(points []KDPoint, zoom int) []KDPoint {
-	// Calculate radius in world coordinates
-	r := sc.Options.Radius / float64(sc.Options.Extent) * math.Pow(2, float64(sc.Options.MaxZoom-zoom))
+    // Calculate radius with higher precision
+    radius := sc.Options.Radius / float64(sc.Options.Extent) * math.Pow(2, float64(sc.Options.MaxZoom-zoom))
+    
+    clusters := make([]KDPoint, 0)
+    processed := make(map[uint32]struct{})
 
-	clusters := make([]KDPoint, 0)
-	processed := make(map[uint32]bool)
+    // Track points before clustering
+    var totalPointsBefore uint32
+    pointsBefore := make(map[uint32]struct{})
+    for _, p := range points {
+        totalPointsBefore += p.NumPoints
+        pointsBefore[p.ID] = struct{}{}
+    }
 
-	// Group points by cell
-	cells := make(map[string][]KDPoint)
-	for _, p := range points {
-		projected := sc.project(p.X, p.Y, zoom)
-		cellKey := fmt.Sprintf("%d:%d", int(projected[0]/r), int(projected[1]/r))
-		cells[cellKey] = append(cells[cellKey], p)
+    // Group points by cell with boundary tracking
+    cells := make(map[uint64][]KDPoint)
+    pointsInCells := make(map[uint32]uint64) // Track which cell each point goes into
+    
+    for _, p := range points {
+        projected := sc.projectFast(p.X, p.Y, zoom)
+        
+        // Use higher precision for cell calculations
+        projX := float64(projected[0]) / radius
+        projY := float64(projected[1]) / radius
+        
+        // Check for points near cell boundaries
+        fracX := math.Abs(projX - math.Floor(projX))
+        fracY := math.Abs(projY - math.Floor(projY))
+        
+        if (fracX < 1e-10 || math.Abs(fracX-1) < 1e-10) ||
+           (fracY < 1e-10 || math.Abs(fracY-1) < 1e-10) {
+            
+        }
+        
+        // More precise rounding for cell assignment
+        cellX := int32(math.Floor(projX + 0.5))
+        cellY := int32(math.Floor(projY + 0.5))
+        
+        cellKey := (uint64(cellX) << 32) | uint64(uint32(cellY))
+        cells[cellKey] = append(cells[cellKey], p)
+        pointsInCells[p.ID] = cellKey
+    }
+
+    // Process cells
+    cellClusters := make(map[uint64]*KDPoint)
+    for cellKey, cellPoints := range cells {
+        if len(cellPoints) < sc.Options.MinPoints {
+            continue
+        }
+
+        cluster := processCell(cellPoints, processed, sc.Options.MinPoints)
+        if cluster != nil {
+            cellClusters[cellKey] = cluster
+            clusters = append(clusters, *cluster)
+        }
+    }
+
+    // Track unclustered points
+    var preservedPoints uint32
+    unclusteredIDs := make(map[uint32]struct{})
+    
+    for _, p := range points {
+        if _, exists := processed[p.ID]; !exists {
+            preservedPoints += p.NumPoints
+            clusters = append(clusters, p)
+            processed[p.ID] = struct{}{}
+            unclusteredIDs[p.ID] = struct{}{}
+        }
+    }
+
+    // Check for lost points
+    for id := range pointsBefore {
+        if _, inProcessed := processed[id]; !inProcessed {
+            if cellKey, inCell := pointsInCells[id]; inCell {
+                if sc.Options.Log {
+                    fmt.Printf("Zoom %d - Lost point ID %d was assigned to cell %d but not processed\n",
+                        zoom, id, cellKey)
+                }
+            } else {
+                if sc.Options.Log {
+                    fmt.Printf("Zoom %d - Lost point ID %d was never assigned to a cell\n",
+                        zoom, id)
+                }
+            }
+        }
+    }
+
+    // Final count verification
+    var totalPointsAfter uint32
+    for _, c := range clusters {
+        totalPointsAfter += c.NumPoints
+    }
+    
+    if totalPointsAfter != totalPointsBefore {
+        fmt.Printf("Zoom %d - Point count mismatch - Before: %d, After: %d (diff: %d)\n",
+            zoom, totalPointsBefore, totalPointsAfter, totalPointsBefore - totalPointsAfter)
+        fmt.Printf("Zoom %d - Points distribution - Clustered: %d, Preserved: %d\n",
+            zoom, totalPointsAfter-preservedPoints, preservedPoints)
+    }
+
+    return clusters
+}
+
+func processCell(points []KDPoint, processed map[uint32]struct{}, minClusterPoints int) *KDPoint {
+    // First collect all unprocessed points
+    unprocessedPoints := make([]KDPoint, 0, len(points))
+    var totalUnprocessedCount uint32
+    
+    for _, p := range points {
+        if _, exists := processed[p.ID]; !exists {
+            unprocessedPoints = append(unprocessedPoints, p)
+            totalUnprocessedCount += p.NumPoints
+        }
+    }
+
+    // If not enough points to cluster, return nil
+    if len(unprocessedPoints) < minClusterPoints {
+        return nil
+    }
+
+    // Create cluster
+    cluster := &KDPoint{
+        Metrics:   make(map[string]float32),
+        NumPoints: totalUnprocessedCount,
+    }
+
+    // Use double precision for accumulation
+    var sumX, sumY float64
+    metricSums := make(map[string]float64)
+
+    // First pass: accumulate sums using double precision
+    for _, p := range unprocessedPoints {
+        pointWeight := float64(p.NumPoints)
+        sumX += float64(p.X) * pointWeight
+        sumY += float64(p.Y) * pointWeight
+        
+        for k, v := range p.Metrics {
+            metricSums[k] += float64(v) * pointWeight
+        }
+    }
+
+    // Second pass: compute final values with proper normalization
+    if totalUnprocessedCount > 0 {
+        invTotal := 1.0 / float64(totalUnprocessedCount)
+        cluster.X = float32(sumX * invTotal)
+        cluster.Y = float32(sumY * invTotal)
+        
+        for k, sum := range metricSums {
+            cluster.Metrics[k] = float32(sum * invTotal)
+        }
+    }
+
+    // Mark points as processed
+    for _, p := range unprocessedPoints {
+        processed[p.ID] = struct{}{}
+    }
+
+    cluster.ID = uuid.New().ID()
+    return cluster
+}
+
+func (sc *Supercluster) projectFast(lng, lat float32, zoom int) [2]float32 {
+	sin := float32(math.Sin(float64(lat) * math.Pi / 180))
+	x := (lng + 180) / 360
+	y := float32(0.5 - 0.25*math.Log(float64((1+sin)/(1-sin)))/math.Pi)
+
+	scale := float32(math.Pow(2, float64(zoom)))
+	return [2]float32{
+		x * scale * float32(sc.Options.Extent),
+		y * scale * float32(sc.Options.Extent),
 	}
-
-	// Process each cell
-	for _, cellPoints := range cells {
-		if len(cellPoints) < sc.Options.MinPoints {
-			// Add individual points if below threshold
-			clusters = append(clusters, cellPoints...)
-			continue
-		}
-
-		// Create a cluster from points in this cell
-		cluster := KDPoint{
-			X:         0,
-			Y:         0,
-			NumPoints: 0,
-			Metrics:   make(map[string]float64),
-		}
-
-		// Calculate weighted centroid and sum metrics
-		for _, p := range cellPoints {
-			if processed[p.ID] {
-				continue
-			}
-
-			cluster.X += p.X * float64(p.NumPoints)
-			cluster.Y += p.Y * float64(p.NumPoints)
-			cluster.NumPoints += p.NumPoints
-
-			// Sum metrics
-			for k, v := range p.Metrics {
-				cluster.Metrics[k] += v * float64(p.NumPoints)
-			}
-
-			processed[p.ID] = true
-		}
-
-		// Finalize cluster
-		if cluster.NumPoints >= uint32(sc.Options.MinPoints) {
-			cluster.X /= float64(cluster.NumPoints)
-			cluster.Y /= float64(cluster.NumPoints)
-
-			// Average metrics
-			for k := range cluster.Metrics {
-				cluster.Metrics[k] /= float64(cluster.NumPoints)
-			}
-
-			// Generate unique ID for cluster
-			cluster.ID = uint32(len(clusters) + 1)
-
-			clusters = append(clusters, cluster)
-		}
-	}
-
-	return clusters
 }
 
 // unproject converts tile coordinates to lng/lat
@@ -396,8 +513,8 @@ func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
 	}
 
 	// Project bounds to tile space
-	minP := sc.project(bounds.MinX, bounds.MaxY, zoom) // Note: Y is inverted in tile space
-	maxP := sc.project(bounds.MaxX, bounds.MinY, zoom)
+	minP := sc.projectFast(bounds.MinX, bounds.MaxY, zoom) // Note: Y is inverted in tile space
+	maxP := sc.projectFast(bounds.MaxX, bounds.MinY, zoom)
 
 	fmt.Printf("Debug: Projected bounds at zoom %d: min(%f,%f) max(%f,%f)\n",
 		zoom, minP[0], minP[1], maxP[0], maxP[1])
@@ -405,7 +522,7 @@ func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
 	// Debugging: Print some sample points
 	if len(tree.Points) > 0 {
 		p := tree.Points[0]
-		proj := sc.project(p.X, p.Y, zoom)
+		proj := sc.projectFast(p.X, p.Y, zoom)
 		fmt.Printf("Debug: Sample point at zoom %d: orig(%f,%f) proj(%f,%f)\n",
 			zoom, p.X, p.Y, proj[0], proj[1])
 	}
@@ -414,7 +531,7 @@ func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
 
 	// Process each point
 	for _, p := range tree.Points {
-		proj := sc.project(p.X, p.Y, zoom)
+		proj := sc.projectFast(p.X, p.Y, zoom)
 
 		// Check if the point is within the projected bounds
 		if proj[0] >= minP[0] && proj[0] <= maxP[0] &&
@@ -458,7 +575,7 @@ func (sc *Supercluster) ToGeoJSON(bounds KDBounds, zoom int) (*FeatureCollection
 			Type: "Feature",
 			Geometry: Geometry{
 				Type:        "Point",
-				Coordinates: []float64{cluster.X, cluster.Y},
+				Coordinates: []float64{float64(cluster.X), float64(cluster.Y)},
 			},
 			Properties: properties,
 		}
@@ -470,7 +587,7 @@ func (sc *Supercluster) ToGeoJSON(bounds KDBounds, zoom int) (*FeatureCollection
 	}, nil
 }
 
-func generateClusterID(x, y float64, zoom int) uint32 {
+func generateClusterID(x, y float32, zoom int) uint32 {
 	// Create a unique ID based on position and zoom
 	h := fnv.New32()
 	fmt.Fprintf(h, "%.6f:%.6f:%d", x, y, zoom)
@@ -478,12 +595,12 @@ func generateClusterID(x, y float64, zoom int) uint32 {
 }
 
 // queryTree recursively searches KD-tree within bounds
-func (sc *Supercluster) queryTree(tree *KDTree, minX, minY, maxX, maxY float64, callback func(KDPoint)) {
+func (sc *Supercluster) queryTree(tree *KDTree, minX, minY, maxX, maxY float32, callback func(KDPoint)) {
 	// Project the points at the current zoom level
 	zoom := sc.Options.MaxZoom // Use appropriate zoom level
 	for _, p := range tree.Points {
 		// Project the point coordinates
-		projected := sc.project(p.X, p.Y, zoom)
+		projected := sc.projectFast(p.X, p.Y, zoom)
 
 		// Check if the projected point is within bounds
 		if projected[0] >= minX && projected[0] <= maxX &&
@@ -508,8 +625,8 @@ func Example() {
 
 	// Generate some test points
 	points := []Point{
-		{X: -122.4194, Y: 37.7749, ID: 1, Metrics: map[string]float64{"value": 100}},
-		{X: -122.4195, Y: 37.7748, ID: 2, Metrics: map[string]float64{"value": 200}},
+		{X: -122.4194, Y: 37.7749, ID: 1, Metrics: map[string]float32{"value": 100}},
+		{X: -122.4195, Y: 37.7748, ID: 2, Metrics: map[string]float32{"value": 200}},
 		// ... more points
 	}
 
