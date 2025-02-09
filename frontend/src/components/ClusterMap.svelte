@@ -1,26 +1,41 @@
 <!-- ClusterMap.svelte -->
 <script lang="ts">
     import { onMount, onDestroy } from 'svelte';
-    import mapboxgl from 'mapbox-gl';
+    import mapboxgl, { type LngLatLike } from 'mapbox-gl';
     import 'mapbox-gl/dist/mapbox-gl.css';
   
-    export let mapboxToken: string;
-    export let apiBaseUrl = 'http://localhost:8000';
-    export let initialZoom = 10;
-    export let center = [-122.4, 37.8];
-    export let width = '800px';
-    export let height = '700px';
-    export let className = '';
-    export let reloadTrigger = 0;  // Increment this to force reload
+    const {
+        mapboxToken,
+        apiBaseUrl = 'http://localhost:8000',
+        initialZoom = 10,
+        center = [-122.4, 37.8],
+        width = '800px',
+        height = '700px',
+        className = '',
+        reloadTrigger = 0
+    } = $props<{
+        mapboxToken: string;
+        apiBaseUrl?: string;
+        initialZoom?: number;
+        center?: [number, number];
+        width?: string;
+        height?: string;
+        className?: string;
+        reloadTrigger?: number;
+    }>();
   
     let map: mapboxgl.Map;
     let mapContainer: HTMLDivElement;
-    let isLoading = false;
+    let isLoading = $state(false);
   
-    $: if (reloadTrigger && map) {
-        const bounds = map.getBounds();
-        fetchClusters(bounds, map.getZoom());
-    }
+    $effect(() => {
+        if (reloadTrigger && map) {
+            const bounds = map.getBounds();
+            if (bounds) {
+                fetchClusters(bounds, map.getZoom());
+            }
+        }
+    });
   
     async function fetchClusters(bounds: mapboxgl.LngLatBounds, zoom: number) {
       isLoading = true;
@@ -146,11 +161,12 @@
         if (!e.features?.[0]) return;
         
         const feature = e.features[0];
+        if (feature.geometry.type !== 'Point') return;
+        
         const coordinates = feature.geometry.coordinates.slice() as [number, number];
         
-        // Ensure proper zoom level change
         const currentZoom = map.getZoom();
-        const targetZoom = Math.min(currentZoom + 2, 16); // Zoom in by 2 levels, max zoom 16
+        const targetZoom = Math.min(currentZoom + 2, 16);
         
         map.flyTo({
           center: coordinates,

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -78,6 +79,14 @@ type ClusterServer struct {
 	cluster *cluster.Supercluster
 }
 
+func (s *ClusterServer) Cleanup() {
+	if s.cluster != nil {
+		s.cluster.CleanupCluster()
+		s.cluster = nil
+	}
+	runtime.GC()
+}
+
 func formatFileSize(size int64) string {
 	const unit = 1024
 	if size < unit {
@@ -127,15 +136,15 @@ func findLatestClusterFile() (string, error) {
 
 func NewClusterServer(numPoints int) *ClusterServer {
 	fmt.Printf("\n=== Starting NewClusterServer with %d points ===\n", numPoints)
+
 	// Create clusters directory if it doesn't exist
 	if err := os.MkdirAll(CLUSTER_SAVE_DIR, 0755); err != nil {
 		fmt.Printf("Failed to create clusters directory: %v\n", err)
 	}
 
-	// If we're creating a new cluster, don't try to load existing
+	// Only generate new cluster if numPoints > 0
 	if numPoints > 0 {
 		fmt.Printf("Generating new cluster with %d points...\n", numPoints)
-		// Use the existing point generation code
 		bounds := cluster.KDBounds{
 			MinX: -125.0,
 			MinY: 25.0,
@@ -175,25 +184,8 @@ func NewClusterServer(numPoints int) *ClusterServer {
 		}
 	}
 
-	// Try to load existing cluster
-	if latestFile, err := findLatestClusterFile(); err == nil {
-		loadStart := time.Now()
-		if cluster, err := cluster.LoadCompressedSupercluster(latestFile); err == nil {
-			loadDuration := time.Since(loadStart)
-			fileInfo, _ := os.Stat(latestFile)
-			fmt.Printf("Loaded existing cluster from %s (file size: %s) in %v\n",
-				latestFile, formatFileSize(fileInfo.Size()), loadDuration)
-			return &ClusterServer{
-				cluster: cluster,
-			}
-		} else {
-			fmt.Printf("Could not load existing cluster (%v)\n", err)
-		}
-	} else {
-		fmt.Printf("No existing cluster found in %s\n", CLUSTER_SAVE_DIR)
-	}
-
-	return nil // Return nil if no cluster was loaded
+	// Return empty server if numPoints is 0
+	return &ClusterServer{}
 }
 
 // Add this new type for cluster info
@@ -319,16 +311,9 @@ func main() {
 		fmt.Printf("Error checking cluster directory: %v\n", err)
 	}
 
-	fmt.Println("Starting NewClusterServer...")
-	start := time.Now()
-	server := NewClusterServer(0) // Pass 0 to only try loading existing cluster
-	duration := time.Since(start)
-	fmt.Printf("NewClusterServer initialized in %v\n", duration)
-
-	if server == nil {
-		// No existing cluster found, create empty server
-		server = &ClusterServer{}
-	}
+	// Initialize with empty server instead of loading last cluster
+	server := &ClusterServer{}
+	fmt.Println("Started with empty cluster server - waiting for cluster to be loaded...")
 
 	r := gin.Default()
 
@@ -472,6 +457,13 @@ func main() {
 	// Add this to your main() function where the other routes are
 	r.POST("/api/clusters/load/:id", func(c *gin.Context) {
 		id := c.Param("id")
+		fmt.Printf("Received request to load cluster with ID: %s\n", id)
+
+		// Clean up existing cluster before loading new one
+		if server.cluster != nil {
+			server.Cleanup()
+		}
+
 		if err := server.loadClusterById(id); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return

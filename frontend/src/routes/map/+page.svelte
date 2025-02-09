@@ -8,21 +8,23 @@
     
     let mapReloadTrigger = 0;
     
-    async function handleClusterSelect(event: CustomEvent<string>) {
+    async function loadCluster(event: CustomEvent<string>) {
         try {
             const response = await fetch(`${API_BASE_URL}/api/clusters/load/${event.detail}`, {
                 method: 'POST'
             });
             
             if (!response.ok) {
-                throw new Error('Failed to load cluster');
+                const error = await response.json();
+                throw new Error(error.error || 'Failed to load cluster');
             }
             
-            // Increment trigger to force map reload
-            mapReloadTrigger += 1;
-        } catch (err) {
-            console.error('Error loading cluster:', err);
-            alert('Failed to load cluster');
+            // Trigger map refresh
+            mapReloadTrigger++;
+            
+        } catch (error) {
+            console.error('Error loading cluster:', error);
+            // Handle error (show to user)
         }
     }
     
@@ -35,7 +37,7 @@
 <div class="container">
     <ClusterSelector
         apiBaseUrl={API_BASE_URL}
-        on:selectCluster={handleClusterSelect}
+        on:selectCluster={loadCluster}
         on:clusterCreated={handleClusterCreated}
     />
     

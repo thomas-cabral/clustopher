@@ -1,12 +1,18 @@
 package cluster
 
 import (
+	"bufio"
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
+	"runtime"
 	"sort"
+	"time"
+
+	"runtime/debug"
 
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
@@ -77,11 +83,6 @@ func (sc *Supercluster) ToGeoJSON(bounds KDBounds, zoom int) (*FeatureCollection
 		properties["cluster"] = cluster.Count > 1
 		properties["cluster_id"] = cluster.ID
 		properties["point_count"] = cluster.Count
-
-		// Add metrics if they exist
-		if cluster.Metrics.Values != nil {
-			properties["metrics"] = cluster.Metrics.Values
-		}
 
 		// Add metadata if it exists
 		if cluster.Metadata != nil {
@@ -174,7 +175,7 @@ func NewKDTree(points []KDPoint, nodeSize int) *KDTree {
 
 	// Create tree
 	tree := &KDTree{
-		Points:   pointsCopy, // Store the copy of points
+		Points:   pointsCopy,
 		NodeSize: nodeSize,
 		Bounds:   bounds,
 	}
@@ -394,6 +395,7 @@ func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
 
 	return clusters
 }
+
 func (sc *Supercluster) clusterPoints(points []KDPoint, radius float32) []ClusterNode {
 	fmt.Printf("Clustering %d points with radius %f\n", len(points), radius)
 
@@ -493,12 +495,13 @@ type Point struct {
 	Metadata map[string]interface{}
 }
 
+// Modify KDPoint to be more memory efficient
 type KDPoint struct {
-	X, Y      float32
-	ID        uint32
-	ParentID  uint32
-	NumPoints uint32
-	Metrics   map[string]float32
+	X, Y      float32            // 8 bytes
+	ID        uint32             // 4 bytes
+	ParentID  uint32             // 4 bytes
+	NumPoints uint32             // 4 bytes
+	Metrics   map[string]float32 // Change back to map for compatibility
 }
 
 type ClusterNode struct {
@@ -555,7 +558,7 @@ func (sc *Supercluster) unprojectFast(x, y float32, zoom int) [2]float32 {
 	return [2]float32{lng, lat}
 }
 
-// SaveCompressed saves the KDTree to a zstd compressed file
+//SaveCompressed saves the KDTree to a zstd compressed file
 func (t *KDTree) SaveCompressed(filename string) error {
 	file, err := os.Create(filename)
 	if err != nil {
@@ -630,55 +633,57 @@ func LoadCompressedKDTree(filename string) (*KDTree, error) {
 }
 
 // SaveCompressed saves the Supercluster to a zstd compressed file
-func (sc *Supercluster) SaveCompressed(filename string) error {
-	fmt.Printf("Attempting to save cluster to %s\n", filename)
-	// Create the file
-	file, err := os.Create(filename)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %v", err)
-	}
-	defer file.Close()
+// func (sc *Supercluster) SaveCompressed(filename string) error {
+// 	fmt.Printf("Attempting to save cluster to %s\n", filename)
+// 	// Create the file
+// 	file, err := os.Create(filename)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to create file: %v", err)
+// 	}
+// 	defer file.Close()
 
-	// Create zstd writer
-	enc, err := zstd.NewWriter(file)
-	if err != nil {
-		return fmt.Errorf("failed to create zstd writer: %v", err)
-	}
-	defer enc.Close()
+// 	// Create zstd writer
+// 	enc, err := zstd.NewWriter(file)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to create zstd writer: %v", err)
+// 	}
+// 	defer enc.Close()
 
-	// Create encoder
-	gobEnc := gob.NewEncoder(enc)
+// 	// Create encoder
+// 	gobEnc := gob.NewEncoder(enc)
 
-	// Create a serializable version of the supercluster
-	serialCluster := struct {
-		Tree    *KDTree
-		Points  []Point
-		Options SuperclusterOptions
-	}{
-		Tree:    sc.Tree,
-		Points:  sc.Points,
-		Options: sc.Options,
-	}
+// 	// Create a serializable version of the supercluster
+// 	serialCluster := struct {
+// 		Tree    *KDTree
+// 		Points  []Point
+// 		Options SuperclusterOptions
+// 	}{
+// 		Tree:    sc.Tree,
+// 		Points:  sc.Points,
+// 		Options: sc.Options,
+// 	}
 
-	fmt.Printf("Serializing cluster with %d points\n", len(serialCluster.Points))
+// 	fmt.Printf("Serializing cluster with %d points\n", len(serialCluster.Points))
 
-	// Encode the cluster
-	if err := gobEnc.Encode(serialCluster); err != nil {
-		return fmt.Errorf("failed to encode cluster: %v", err)
-	}
+// 	// Encode the cluster
+// 	if err := gobEnc.Encode(serialCluster); err != nil {
+// 		return fmt.Errorf("failed to encode cluster: %v", err)
+// 	}
 
-	// Verify file was written
-	if info, err := os.Stat(filename); err == nil {
-		fmt.Printf("Successfully wrote cluster file: %s (size: %d bytes)\n", filename, info.Size())
-	} else {
-		fmt.Printf("Error verifying saved file: %v\n", err)
-	}
+// 	// Verify file was written
+// 	if info, err := os.Stat(filename); err == nil {
+// 		fmt.Printf("Successfully wrote cluster file: %s (size: %d bytes)\n", filename, info.Size())
+// 	} else {
+// 		fmt.Printf("Error verifying saved file: %v\n", err)
+// 	}
 
-	return nil
-}
+// 	return nil
+// }
 
-// LoadCompressed loads a Supercluster from a zstd compressed file
+// LoadCompressedSupercluster loads a Supercluster from a zstd compressed file
 func LoadCompressedSupercluster(filename string) (*Supercluster, error) {
+	fmt.Printf("Starting to load cluster from %s\n", filename)
+
 	// Open the file
 	file, err := os.Open(filename)
 	if err != nil {
@@ -686,8 +691,13 @@ func LoadCompressedSupercluster(filename string) (*Supercluster, error) {
 	}
 	defer file.Close()
 
-	// Create zstd reader
-	dec, err := zstd.NewReader(file)
+	// Create buffered reader
+	bufReader := bufio.NewReaderSize(file, 1024*1024) // 1MB buffer
+
+	// Create zstd reader with options for memory usage
+	dec, err := zstd.NewReader(bufReader,
+		zstd.WithDecoderLowmem(true),
+		zstd.WithDecoderMaxMemory(1024*1024*1024)) // 1GB max memory
 	if err != nil {
 		return nil, fmt.Errorf("failed to create zstd reader: %v", err)
 	}
@@ -703,10 +713,21 @@ func LoadCompressedSupercluster(filename string) (*Supercluster, error) {
 		Options SuperclusterOptions
 	}
 
+	fmt.Printf("Starting to decode cluster...\n")
+	memBefore := runtime.MemStats{}
+	runtime.ReadMemStats(&memBefore)
+
 	// Decode the cluster
 	if err := gobDec.Decode(&serialCluster); err != nil {
 		return nil, fmt.Errorf("failed to decode cluster: %v", err)
 	}
+
+	memAfter := runtime.MemStats{}
+	runtime.ReadMemStats(&memAfter)
+
+	fmt.Printf("Memory used for loading: %d MB\n",
+		(memAfter.Alloc-memBefore.Alloc)/1024/1024)
+	fmt.Printf("Loaded cluster with %d points\n", len(serialCluster.Points))
 
 	// Create and return the supercluster
 	cluster := &Supercluster{
@@ -715,5 +736,158 @@ func LoadCompressedSupercluster(filename string) (*Supercluster, error) {
 		Options: serialCluster.Options,
 	}
 
+	// Periodically force GC during loading
+	defer runtime.GC()
+
+	// Use a timer to periodically clean up
+	cleanup := time.NewTicker(5 * time.Second)
+	defer cleanup.Stop()
+
+	go func() {
+		for range cleanup.C {
+			runtime.GC()
+			debug.FreeOSMemory()
+		}
+	}()
+
 	return cluster, nil
+}
+
+// Add this function to help with memory management
+func (sc *Supercluster) CleanupCluster() {
+	if sc != nil {
+		sc.Tree = nil
+		sc.Points = nil
+		// Force garbage collection after clearing large data structures
+		runtime.GC()
+	}
+}
+
+func (sc *Supercluster) GetMemoryStats() string {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	return fmt.Sprintf(
+		"Memory Stats:\n"+
+			"Allocated: %v MB\n"+
+			"Total Allocated: %v MB\n"+
+			"System Memory: %v MB\n"+
+			"Number of GC: %v\n",
+		m.Alloc/1024/1024,
+		m.TotalAlloc/1024/1024,
+		m.Sys/1024/1024,
+		m.NumGC,
+	)
+}
+
+// Add a new function to load points in batches
+func LoadPointsBatch(reader io.Reader, batchSize int) ([]Point, error) {
+	points := make([]Point, 0, batchSize)
+	decoder := gob.NewDecoder(reader)
+
+	for i := 0; i < batchSize; i++ {
+		var point Point
+		err := decoder.Decode(&point)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		points = append(points, point)
+	}
+
+	return points, nil
+}
+
+// Add new batch loading function
+func LoadCompressedSuperclusterBatch(filename string, batchSize int) (*Supercluster, error) {
+	fmt.Printf("Starting to load cluster from %s in batches\n", filename)
+
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %v", err)
+	}
+	defer file.Close()
+
+	bufReader := bufio.NewReaderSize(file, 1024*1024)
+	dec, err := zstd.NewReader(bufReader,
+		zstd.WithDecoderLowmem(true),
+		zstd.WithDecoderMaxMemory(1024*1024*1024))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create zstd reader: %v", err)
+	}
+	defer dec.Close()
+
+	gobDec := gob.NewDecoder(dec)
+
+	// First read the header/options
+	var options SuperclusterOptions
+	if err := gobDec.Decode(&options); err != nil {
+		return nil, fmt.Errorf("failed to decode options: %v", err)
+	}
+
+	cluster := NewSupercluster(options)
+
+	// Read points in batches
+	var points []Point
+	for {
+		batch := make([]Point, 0, batchSize)
+		for i := 0; i < batchSize; i++ {
+			var point Point
+			if err := gobDec.Decode(&point); err != nil {
+				if err == io.EOF {
+					break
+				}
+				return nil, fmt.Errorf("failed to decode point: %v", err)
+			}
+			batch = append(batch, point)
+		}
+
+		if len(batch) == 0 {
+			break
+		}
+
+		points = append(points, batch...)
+
+		// Force GC after each batch
+		runtime.GC()
+		debug.FreeOSMemory()
+	}
+
+	// Load points into cluster
+	cluster.Load(points)
+
+	return cluster, nil
+}
+
+// Modify SaveCompressed to support batch loading format
+func (sc *Supercluster) SaveCompressed(filename string) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %v", err)
+	}
+	defer file.Close()
+
+	enc, err := zstd.NewWriter(file)
+	if err != nil {
+		return fmt.Errorf("failed to create zstd writer: %v", err)
+	}
+	defer enc.Close()
+
+	gobEnc := gob.NewEncoder(enc)
+
+	// First write options
+	if err := gobEnc.Encode(sc.Options); err != nil {
+		return fmt.Errorf("failed to encode options: %v", err)
+	}
+
+	// Then write points
+	for _, point := range sc.Points {
+		if err := gobEnc.Encode(point); err != nil {
+			return fmt.Errorf("failed to encode point: %v", err)
+		}
+	}
+
+	return nil
 }
