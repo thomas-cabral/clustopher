@@ -218,44 +218,44 @@ func main() {
 	})
 
 	// Get statistics about the current clustering
-	r.GET("/api/stats", func(c *gin.Context) {
-		stats := map[string]interface{}{
-			"total_points": len(server.cluster.Points),
-			"options":      server.cluster.Options,
-			"zoom_levels":  map[int]int{},
-		}
+// 	r.GET("/api/stats", func(c *gin.Context) {
+// 		stats := map[string]interface{}{
+// 			"total_points": len(server.cluster.Points),
+// 			"options":      server.cluster.Options,
+// 			"zoom_levels":  map[int]int{},
+// 		}
 
-		// Count points at each zoom level
-		for zoom, tree := range server.cluster.Trees {
-			if tree != nil {
-				stats["zoom_levels"].(map[int]int)[zoom] = len(tree.Points)
-			}
-		}
+// 		// Count points at each zoom level
+// 		for zoom, tree := range server.cluster.Tree {
+// 			if tree != nil {
+// 				stats["zoom_levels"].(map[int]int)[zoom] = len(tree.Points)
+// 			}
+// 		}
 
-		// Get current memory stats
-		var memStats runtime.MemStats
-		runtime.ReadMemStats(&memStats)
+// 		// Get current memory stats
+// 		var memStats runtime.MemStats
+// 		runtime.ReadMemStats(&memStats)
 
-		stats["memory"] = map[string]interface{}{
-			"Alloc":      memStats.Alloc,
-			"TotalAlloc": memStats.TotalAlloc,
-			"Sys":        memStats.Sys,
-			"NumGC":      memStats.NumGC,
-		}
+// 		stats["memory"] = map[string]interface{}{
+// 			"Alloc":      memStats.Alloc,
+// 			"TotalAlloc": memStats.TotalAlloc,
+// 			"Sys":        memStats.Sys,
+// 			"NumGC":      memStats.NumGC,
+// 		}
 
-		c.JSON(http.StatusOK, stats)
-	})
+// 		c.JSON(http.StatusOK, stats)
+// 	})
 
 	fmt.Println("Starting server on :8080...")
 	r.Run(":8000")
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
+// func min(a, b int) int {
+// 	if a < b {
+// 		return a
+// 	}
+// 	return b
+// }
 
 // generateTestPoints creates n random points within specified bounds
 func generateTestPoints(n int, bounds cluster.KDBounds) []cluster.Point {
