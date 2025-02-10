@@ -1,6 +1,6 @@
 # Clustopher
 
-[![Go Tests](https://github.com/thomas-cabral/clustopher/actions/workflows/go-test.yml/badge.svg)](https://github.com/thomas-cabral/clustopher/actions/workflows/go-test.yml)
+[![Go Tests](https://github.com/thomas-cabral/clustopher/actions/workflows/go-test.yml/badge.svg)](https://github.com/thomas-cabral/clustopher/actions/workflows/go.yml)
 
 [![codecov](https://codecov.io/gh/thomas-cabral/clustopher/branch/main/graph/badge.svg)](https://codecov.io/gh/thomas-cabral/clustopher)
 
