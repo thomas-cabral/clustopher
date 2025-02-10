@@ -32,6 +32,10 @@
         // Increment trigger to force map reload
         mapReloadTrigger += 1;
     }
+
+    function handleClusterLoaded() {
+        mapReloadTrigger += 1;
+    }
 </script>
 
 <div class="container">
@@ -39,8 +43,10 @@
         apiBaseUrl={API_BASE_URL}
         on:selectCluster={loadCluster}
         on:clusterCreated={handleClusterCreated}
+        on:clusterLoaded={handleClusterLoaded}
     />
     
+    {#if MAPBOX_TOKEN}
     <ClusterMap
         mapboxToken={MAPBOX_TOKEN}
         apiBaseUrl={API_BASE_URL}
@@ -48,6 +54,7 @@
         height="600px"
         reloadTrigger={mapReloadTrigger}
     />
+     {/if}
 </div>
 
 <style>

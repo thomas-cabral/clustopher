@@ -1,19 +1,28 @@
 <script lang="ts">
     import { createEventDispatcher, onMount } from 'svelte';
     
-    export let apiBaseUrl: string;
+    const { apiBaseUrl } = $props<{ apiBaseUrl: string }>();
     
     let clusters: Array<{
         id: string;
         numPoints: number;
         timestamp: string;
         fileSize: number;
-    }> = [];
-    let loading = false;
-    let newClusterPoints = "300000";
-    let error = '';
+    }> = $state([]);
+    let loading = $state(false);
+    let newClusterPoints = $state("300000");
+    let error = $state('');
+    let loadedClusterInfo: ClusterInfo | null = $state(null);
+    let loadedClusterId = $state<string | null>(null);
     
     const dispatch = createEventDispatcher();
+    
+    interface ClusterInfo {
+        id: string;
+        numPoints: number;
+        timestamp: string;
+        fileSize: number;
+    }
     
     async function loadClusters() {
         loading = true;
@@ -69,6 +78,32 @@
         }
     }
     
+    async function loadCluster(clusterId: string) {
+        loading = true;
+        error = '';
+        try {
+            const response = await fetch(`${apiBaseUrl}/api/clusters/load/${clusterId}`, {
+                method: 'POST'
+            });
+            
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || errorData.message || 'Failed to load cluster');
+            }
+            
+            const responseData: { message: string, clusterInfo: ClusterInfo } = await response.json();
+            loadedClusterInfo = responseData.clusterInfo;
+            dispatch('clusterLoaded');
+            loadedClusterId = clusterId;
+            
+        } catch (err: unknown) {
+            error = err instanceof Error ? err.message : 'Unknown error occurred';
+            console.error('Error loading cluster:', err);
+        } finally {
+            loading = false;
+        }
+    }
+    
     // Load clusters on mount
     onMount(loadClusters);
 </script>
@@ -115,7 +150,10 @@
                             {(cluster.fileSize / (1024 * 1024)).toFixed(1)} MB
                         </span>
                     </div>
-                    <button class="load-button" on:click={() => dispatch('selectCluster', cluster.id)}>
+                    <button class="load-button"
+                        on:click={() => loadCluster(cluster.id)}
+                        disabled={loading || cluster.id === loadedClusterId}
+                    >
                         Load
                     </button>
                 </div>
@@ -123,6 +161,16 @@
             {#if clusters.length === 0}
                 <div class="no-clusters">No saved clusters found</div>
             {/if}
+        </div>
+    {/if}
+
+    {#if loadedClusterInfo}
+        <div class="loaded-cluster-info">
+            <h4>Loaded Cluster</h4>
+            <p><strong>ID:</strong> {loadedClusterInfo.id}</p>
+            <p><strong>Points:</strong> {loadedClusterInfo.numPoints.toLocaleString()}</p>
+            <p><strong>Timestamp:</strong> {new Date(loadedClusterInfo.timestamp).toLocaleString()}</p>
+            <p><strong>File Size:</strong> {(loadedClusterInfo.fileSize / (1024 * 1024)).toFixed(1)} MB</p>
         </div>
     {/if}
 </div>
@@ -225,5 +273,21 @@
     
     .load-button:hover {
         background: #45a049;
+    }
+
+    .loaded-cluster-info {
+        margin-top: 1rem;
+        padding: 1rem;
+        background: white;
+        border-radius: 4px;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+    }
+
+    .loaded-cluster-info h4 {
+        margin-top: 0;
+    }
+
+    .loaded-cluster-info p {
+        margin: 0.25rem 0;
     }
 </style> 

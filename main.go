@@ -209,22 +209,38 @@ func (s *ClusterServer) listClusters() ([]ClusterInfo, error) {
 	return clusters, nil
 }
 
-func (s *ClusterServer) loadClusterById(id string) error {
+func (s *ClusterServer) loadClusterById(id string) (*ClusterInfo, error) {
 	files, err := os.ReadDir(CLUSTER_SAVE_DIR)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var clusterFile string
+	var loadedClusterInfo *ClusterInfo // To store cluster info
+
 	for _, file := range files {
 		if strings.Contains(file.Name(), id) {
 			clusterFile = filepath.Join(CLUSTER_SAVE_DIR, file.Name())
+			// Parse filename to get cluster info to return
+			name := strings.TrimSuffix(file.Name(), ".zst")
+			parts := strings.Split(name, "-")
+			if len(parts) == 5 {
+				numPoints, _ := strconv.Atoi(strings.TrimSuffix(parts[1], "p"))
+				timestamp, _ := time.Parse("20060102-150405", parts[2]+"-"+parts[3])
+				fileInfo, _ := os.Stat(clusterFile) // Get file size
+				loadedClusterInfo = &ClusterInfo{
+					ID:        parts[4],
+					NumPoints: numPoints,
+					Timestamp: timestamp,
+					FileSize:  fileInfo.Size(),
+				}
+			}
 			break
 		}
 	}
 
 	if clusterFile == "" {
-		return fmt.Errorf("cluster with ID %s not found", id)
+		return nil, fmt.Errorf("cluster with ID %s not found", id)
 	}
 
 	loadStart := time.Now() // Start timer for LoadCompressedSupercluster
@@ -233,15 +249,15 @@ func (s *ClusterServer) loadClusterById(id string) error {
 	fmt.Printf("Cluster loaded from file in %v\n", loadDuration)
 
 	if err != nil {
-		return fmt.Errorf("failed to load cluster: %v", err)
+		return nil, fmt.Errorf("failed to load cluster: %v", err)
 	}
 
 	if loadedCluster == nil {
-		return fmt.Errorf("loaded cluster is nil")
+		return nil, fmt.Errorf("loaded cluster is nil")
 	}
 
 	s.cluster = loadedCluster
-	return nil
+	return loadedClusterInfo, nil // Return ClusterInfo
 }
 
 func main() {
@@ -410,11 +426,12 @@ func main() {
 			server.Cleanup()
 		}
 
-		if err := server.loadClusterById(id); err != nil {
+		clusterInfo, err := server.loadClusterById(id) // Capture ClusterInfo
+		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"message": "Cluster loaded successfully"})
+		c.JSON(http.StatusOK, gin.H{"message": "Cluster loaded successfully", "clusterInfo": clusterInfo}) // Return ClusterInfo in response
 	})
 
 	// Create a channel to listen for interrupt signals
