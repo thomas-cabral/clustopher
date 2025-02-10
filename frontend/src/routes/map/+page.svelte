@@ -3,7 +3,7 @@
     import ClusterMap from '../../components/ClusterMap.svelte';
     import ClusterSelector from '../../components/ClusterSelector.svelte';
     
-    const MAPBOX_TOKEN = 'pk.eyJ1IjoidGNhYnJhbCIsImEiOiJjbTZ3eHh6b3IwZnBiMmxwczA1NGJrNWw3In0.Bm0HoSBdzvnAZ4FuoFDgNA';
+    const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
     const API_BASE_URL = 'http://localhost:8000';
     
     let mapReloadTrigger = 0;

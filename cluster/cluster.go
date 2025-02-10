@@ -2,7 +2,7 @@ package cluster
 
 import (
 	"bufio"
-	"encoding/gob"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,30 +10,70 @@ import (
 	"os"
 	"runtime"
 	"sort"
-	"time"
+	"strings"
+	"sync"
 
 	"runtime/debug"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 )
 
-// KDTree implements a KD-tree for spatial indexing
-type KDTree struct {
-	Root     *KDNode
-	Points   []KDPoint // Store all points for easy access
-	NodeSize int
-	Bounds   KDBounds
+// Add Pool to KDTree struct
+type KDNode struct {
+	PointIdx int32  // 4 bytes - index into points array
+	Left     int32  // 4 bytes - index into nodes array
+	Right    int32  // 4 bytes - index into nodes array
+	Axis     uint8  // 1 byte  - 0 or 1 is sufficient
+	MinChild uint32 // 4 bytes
+	MaxChild uint32 // 4 bytes
 }
 
-// KDNode represents a node in the KD-tree
-type KDNode struct {
-	Point    KDPoint
-	Left     *KDNode
-	Right    *KDNode
-	Axis     int    // 0 for X, 1 for Y
-	MinChild uint32 // Minimum point ID in subtree
-	MaxChild uint32 // Maximum point ID in subtree
+type KDTree struct {
+	Nodes    []KDNode  // All nodes in a single slice
+	Points   []KDPoint // All points in a single slice
+	NodeSize int
+	Bounds   KDBounds
+	Pool     *MetricsPool // Reference to shared metrics pool
+}
+
+type KDPoint struct {
+	X, Y      float32                // 8 bytes
+	ID        uint32                 // 4 bytes
+	NumPoints uint32                 // 4 bytes
+	MetricIdx uint32                 // 4 bytes - index into metrics pool
+	Metadata  map[string]interface{} // Keep metadata for clustering
+}
+
+type Point struct {
+	ID       uint32
+	X, Y     float32
+	Metrics  map[string]float32
+	Metadata map[string]interface{}
+}
+
+type MetricsPool struct {
+	Metrics []map[string]float32
+	Lookup  map[string]int // For deduplication
+	mu      sync.RWMutex   // Protect concurrent access
+}
+
+type SharedPools struct {
+	MetricsPool  []map[string]float32
+	MetricsKeys  map[string]uint32 // For deduplication
+	StringPool   map[string]uint32 // For deduplicating strings
+	StringValues []string          // Actual string storage
+}
+
+// 3. Optimize ClusterNode to use shared pools
+type ClusterNode struct {
+	ID       uint32
+	X, Y     float32
+	Count    uint32
+	Children []uint32
+	Metrics  ClusterMetrics
+	Metadata map[string]json.RawMessage // Use json.RawMessage to handle different types
 }
 
 // Supercluster implements the clustering algorithm
@@ -146,21 +186,20 @@ func NewSupercluster(options SuperclusterOptions) *Supercluster {
 	}
 }
 
-// NewKDTree creates a new KD-tree with optimized construction
-func NewKDTree(points []KDPoint, nodeSize int) *KDTree {
-	fmt.Printf("Creating KD-tree with %d points\n", len(points))
-
-	if len(points) == 0 {
-		return &KDTree{
-			Points:   []KDPoint{},
-			NodeSize: nodeSize,
-		}
+// Modified NewKDTree that actually uses the pools
+func NewKDTree(points []KDPoint, nodeSize int, metricsPool *MetricsPool) *KDTree {
+	maxNodes := len(points) * 2 // Worst case for a binary tree
+	tree := &KDTree{
+		Nodes:    make([]KDNode, 0, maxNodes),
+		Points:   make([]KDPoint, len(points)),
+		NodeSize: nodeSize,
+		Pool:     metricsPool,
 	}
 
-	// Make a copy of the points slice to avoid modifying the original
-	pointsCopy := make([]KDPoint, len(points))
-	copy(pointsCopy, points)
+	// Copy points to avoid modifying input
+	copy(tree.Points, points)
 
+	// Calculate bounds
 	bounds := KDBounds{
 		MinX: float32(math.Inf(1)),
 		MinY: float32(math.Inf(1)),
@@ -168,57 +207,66 @@ func NewKDTree(points []KDPoint, nodeSize int) *KDTree {
 		MaxY: float32(math.Inf(-1)),
 	}
 
-	// Calculate bounds
-	for _, p := range pointsCopy {
+	for _, p := range points {
 		bounds.Extend(p.X, p.Y)
 	}
+	tree.Bounds = bounds
 
-	// Create tree
-	tree := &KDTree{
-		Points:   pointsCopy,
-		NodeSize: nodeSize,
-		Bounds:   bounds,
+	// Build tree if we have points
+	if len(points) > 0 {
+		tree.buildNodes(0, len(points)-1, 0)
 	}
-
-	// Build tree recursively
-	tree.Root = tree.buildNode(pointsCopy, 0)
-
-	fmt.Printf("Created KD-tree with %d points and bounds: MinX=%f, MinY=%f, MaxX=%f, MaxY=%f\n",
-		len(tree.Points), bounds.MinX, bounds.MinY, bounds.MaxX, bounds.MaxY)
 
 	return tree
 }
 
-// buildNode constructs a KD-tree node recursively
-func (t *KDTree) buildNode(points []KDPoint, depth int) *KDNode {
-	n := len(points)
-	if n == 0 {
-		return nil
+// Modified buildNode to use the node pool
+func (t *KDTree) buildNodes(start, end, depth int) int32 {
+	if start > end {
+		return -1
 	}
 
-	// Create leaf node if we're at nodeSize or below
-	if n <= t.NodeSize {
-		node := &KDNode{
-			Point:    points[0],
-			MinChild: points[0].ID,
-			MaxChild: points[0].ID,
-		}
-		// Update min/max IDs
-		for _, p := range points[1:] {
-			if p.ID < node.MinChild {
-				node.MinChild = p.ID
-			}
-			if p.ID > node.MaxChild {
-				node.MaxChild = p.ID
-			}
-		}
-		return node
+	nodeIdx := int32(len(t.Nodes))
+	t.Nodes = append(t.Nodes, KDNode{})
+	node := &t.Nodes[nodeIdx]
+
+	if end-start <= t.NodeSize {
+		node.PointIdx = int32(start)
+		node.Left = -1
+		node.Right = -1
+		setMinMaxChild(node, t.Points[start:end+1])
+		return nodeIdx
 	}
 
-	// Choose axis based on depth
 	axis := depth % 2
+	median := (start + end) / 2
 
-	// Sort points by the chosen axis
+	sortPointsRange(t.Points[start:end+1], axis)
+
+	node.PointIdx = int32(median)
+	node.Axis = uint8(axis)
+
+	node.Left = t.buildNodes(start, median-1, depth+1)
+	node.Right = t.buildNodes(median+1, end, depth+1)
+
+	setMinMaxChild(node, t.Points[start:end+1])
+	return nodeIdx
+}
+
+func setMinMaxChild(node *KDNode, points []KDPoint) {
+	node.MinChild = points[0].ID
+	node.MaxChild = points[0].ID
+	for _, p := range points[1:] {
+		if p.ID < node.MinChild {
+			node.MinChild = p.ID
+		}
+		if p.ID > node.MaxChild {
+			node.MaxChild = p.ID
+		}
+	}
+}
+
+func sortPointsRange(points []KDPoint, axis int) {
 	if axis == 0 {
 		sort.Slice(points, func(i, j int) bool {
 			return points[i].X < points[j].X
@@ -228,110 +276,269 @@ func (t *KDTree) buildNode(points []KDPoint, depth int) *KDNode {
 			return points[i].Y < points[j].Y
 		})
 	}
+}
 
-	// Find median
-	median := n / 2
+func metricsKey(metrics map[string]float32) string {
+	keys := make([]string, 0, len(metrics))
+	for k := range metrics {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 
-	// Create node
-	node := &KDNode{
-		Point: points[median],
-		Axis:  axis,
+	var b strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&b, "%s:%.6f;", k, metrics[k])
+	}
+	return b.String()
+}
+
+func NewMetricsPool() *MetricsPool {
+	return &MetricsPool{
+		Metrics: make([]map[string]float32, 0),
+		Lookup:  make(map[string]int),
+	}
+}
+
+// CleanupCluster releases memory held by the cluster
+func (sc *Supercluster) CleanupCluster() {
+	if sc == nil {
+		return
 	}
 
-	// Recursively build left and right subtrees
-	node.Left = t.buildNode(points[:median], depth+1)
-	node.Right = t.buildNode(points[median+1:], depth+1)
+	// Clear tree structures
+	if sc.Tree != nil {
+		// Clear nodes array
+		sc.Tree.Nodes = nil
+
+		// Clear points array
+		sc.Tree.Points = nil
+
+		// Clear metrics pool
+		if sc.Tree.Pool != nil {
+			sc.Tree.Pool.Metrics = nil
+			sc.Tree.Pool.Lookup = nil
+			sc.Tree.Pool = nil
+		}
+
+		sc.Tree = nil
+	}
+
+	// Clear original points
+	sc.Points = nil
+
+	// Force immediate garbage collection
+	runtime.GC()
+	debug.FreeOSMemory()
+}
+
+// 6. Implement batch processing for large datasets
+func (sc *Supercluster) LoadBatched(points []Point, batchSize int) {
+	totalPoints := len(points)
+	metricsPool := NewMetricsPool()
+
+	// Process in batches
+	for i := 0; i < totalPoints; i += batchSize {
+		end := i + batchSize
+		if end > totalPoints {
+			end = totalPoints
+		}
+
+		batch := points[i:end]
+		sc.processBatch(batch, metricsPool)
+
+		// Force GC between batches if memory pressure is high
+		if i > 0 && i%(batchSize*10) == 0 {
+			runtime.GC()
+		}
+	}
+}
+
+// processBatch handles a batch of points during loading
+func (sc *Supercluster) processBatch(batch []Point, metricsPool *MetricsPool) {
+	kdPoints := make([]KDPoint, len(batch))
+
+	for i, p := range batch {
+		// Get or add metrics to pool
+		metricsIdx := metricsPool.Add(p.Metrics)
+
+		kdPoints[i] = KDPoint{
+			X:         p.X,
+			Y:         p.Y,
+			ID:        p.ID,
+			NumPoints: 1,
+			MetricIdx: metricsIdx,
+			Metadata:  p.Metadata,
+		}
+	}
+
+	// If this is the first batch, create the tree
+	if sc.Tree == nil {
+		sc.Tree = NewKDTree(kdPoints, sc.Options.NodeSize, metricsPool)
+	} else {
+		// Otherwise, add points to existing tree
+		for _, point := range kdPoints {
+			sc.Tree.Insert(point)
+		}
+	}
+
+	// Append to original points slice
+	sc.Points = append(sc.Points, batch...)
+}
+
+// Add helper method to MetricsPool for clarity
+func (mp *MetricsPool) GetPointMetrics(point KDPoint) map[string]float32 {
+	if mp == nil {
+		return nil
+	}
+	return mp.Get(point.MetricIdx)
+}
+
+// Add inserts metrics into the pool and returns the index
+func (mp *MetricsPool) Add(metrics map[string]float32) uint32 {
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+
+	key := metricsKey(metrics)
+	if idx, exists := mp.Lookup[key]; exists {
+		return uint32(idx)
+	}
+
+	idx := len(mp.Metrics)
+	metricsCopy := make(map[string]float32, len(metrics))
+	for k, v := range metrics {
+		metricsCopy[k] = v
+	}
+
+	mp.Metrics = append(mp.Metrics, metricsCopy)
+	mp.Lookup[key] = idx
+
+	return uint32(idx)
+}
+
+// Get retrieves metrics by index
+func (mp *MetricsPool) Get(idx uint32) map[string]float32 {
+	mp.mu.RLock()
+	defer mp.mu.RUnlock()
+
+	if int(idx) >= len(mp.Metrics) {
+		return nil
+	}
+	return mp.Metrics[idx]
+}
+
+// Insert adds a new point to an existing KDTree
+func (t *KDTree) Insert(point KDPoint) {
+	// If tree is empty, create first node
+	if len(t.Nodes) == 0 {
+		t.Nodes = append(t.Nodes, KDNode{
+			PointIdx: 0,
+			Left:     -1,
+			Right:    -1,
+			Axis:     0,
+			MinChild: point.ID,
+			MaxChild: point.ID,
+		})
+		t.Points = append(t.Points, point)
+		return
+	}
+
+	// Update bounds
+	t.Bounds.Extend(point.X, point.Y)
+
+	// Add point to points slice and get its index
+	pointIdx := int32(len(t.Points))
+	t.Points = append(t.Points, point)
+
+	// Insert into tree structure
+	t.insertNode(0, pointIdx, 0) // Start at root (index 0)
+}
+
+// insertNode recursively finds the right place for a point
+func (t *KDTree) insertNode(nodeIdx int32, pointIdx int32, depth int) {
+	if nodeIdx < 0 || int(nodeIdx) >= len(t.Nodes) {
+		return
+	}
+
+	node := &t.Nodes[nodeIdx]
+	newPoint := t.Points[pointIdx]
 
 	// Update min/max child IDs
-	node.MinChild = node.Point.ID
-	node.MaxChild = node.Point.ID
-
-	if node.Left != nil {
-		if node.Left.MinChild < node.MinChild {
-			node.MinChild = node.Left.MinChild
-		}
-		if node.Left.MaxChild > node.MaxChild {
-			node.MaxChild = node.Left.MaxChild
-		}
+	if newPoint.ID < node.MinChild {
+		node.MinChild = newPoint.ID
 	}
-	if node.Right != nil {
-		if node.Right.MinChild < node.MinChild {
-			node.MinChild = node.Right.MinChild
-		}
-		if node.Right.MaxChild > node.MaxChild {
-			node.MaxChild = node.Right.MaxChild
-		}
+	if newPoint.ID > node.MaxChild {
+		node.MaxChild = newPoint.ID
 	}
 
-	return node
+	// Choose axis based on depth
+	axis := depth % 2
+
+	var compareVal, nodeVal float32
+	if axis == 0 {
+		compareVal = newPoint.X
+		nodeVal = t.Points[node.PointIdx].X
+	} else {
+		compareVal = newPoint.Y
+		nodeVal = t.Points[node.PointIdx].Y
+	}
+
+	// Insert into appropriate subtree
+	if compareVal < nodeVal {
+		if node.Left == -1 {
+			// Create new node
+			newNodeIdx := int32(len(t.Nodes))
+			t.Nodes = append(t.Nodes, KDNode{
+				PointIdx: pointIdx,
+				Left:     -1,
+				Right:    -1,
+				Axis:     uint8((axis + 1) % 2),
+				MinChild: newPoint.ID,
+				MaxChild: newPoint.ID,
+			})
+			node.Left = newNodeIdx
+		} else {
+			t.insertNode(node.Left, pointIdx, depth+1)
+		}
+	} else {
+		if node.Right == -1 {
+			// Create new node
+			newNodeIdx := int32(len(t.Nodes))
+			t.Nodes = append(t.Nodes, KDNode{
+				PointIdx: pointIdx,
+				Left:     -1,
+				Right:    -1,
+				Axis:     uint8((axis + 1) % 2),
+				MinChild: newPoint.ID,
+				MaxChild: newPoint.ID,
+			})
+			node.Right = newNodeIdx
+		} else {
+			t.insertNode(node.Right, pointIdx, depth+1)
+		}
+	}
 }
 
 // Load initializes the cluster index with points
 func (sc *Supercluster) Load(points []Point) {
 	fmt.Printf("Loading %d points\n", len(points))
 
+	metricsPool := NewMetricsPool()
 	kdPoints := make([]KDPoint, len(points))
+
 	for i, p := range points {
+		metricIdx := metricsPool.Add(p.Metrics)
 		kdPoints[i] = KDPoint{
 			X:         p.X,
 			Y:         p.Y,
 			ID:        p.ID,
 			NumPoints: 1,
-			Metrics:   p.Metrics,
+			MetricIdx: metricIdx,
+			Metadata:  p.Metadata,
 		}
 	}
 
 	sc.Points = points
-	sc.Tree = NewKDTree(kdPoints, sc.Options.NodeSize)
-	fmt.Printf("Created KD-tree with %d points\n", len(sc.Tree.Points))
-}
-
-// rangeSearch finds all points within radius of center
-func (t *KDTree) rangeSearch(center KDPoint, radius float32, zoom int, results *[]KDPoint) {
-	if t.Root == nil {
-		return
-	}
-	t.rangeSearchNode(t.Root, center, radius, zoom, results)
-}
-
-func (t *KDTree) rangeSearchNode(node *KDNode, center KDPoint, radius float32, zoom int, results *[]KDPoint) {
-	if node == nil {
-		return
-	}
-
-	// Calculate distance in projected space
-	dx := node.Point.X - center.X
-	dy := node.Point.Y - center.Y
-	dist2 := dx*dx + dy*dy     // squared distance
-	radius2 := radius * radius // squared radius
-
-	// If point is within radius, add it
-	if dist2 <= radius2 {
-		*results = append(*results, node.Point)
-	}
-
-	// Check which child nodes need to be searched
-	var splitDist float32
-	if node.Axis == 0 {
-		splitDist = center.X - node.Point.X
-	} else {
-		splitDist = center.Y - node.Point.Y
-	}
-
-	// Search child nodes if they could contain points within the radius
-	split2 := splitDist * splitDist
-	if split2 <= radius2 { // if the splitting plane is within radius
-		// Search both children
-		t.rangeSearchNode(node.Left, center, radius, zoom, results)
-		t.rangeSearchNode(node.Right, center, radius, zoom, results)
-	} else {
-		// Only search the side of the split that the center is on
-		if splitDist <= 0 {
-			t.rangeSearchNode(node.Left, center, radius, zoom, results)
-		} else {
-			t.rangeSearchNode(node.Right, center, radius, zoom, results)
-		}
-	}
+	sc.Tree = NewKDTree(kdPoints, sc.Options.NodeSize, metricsPool)
 }
 
 // GetClusters returns clusters for the given bounds and zoom level
@@ -351,7 +558,6 @@ func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
 	// Get all points in the bounds
 	var points []KDPoint
 	for _, p := range sc.Tree.Points {
-		// Project point to current zoom level
 		proj := sc.projectFast(p.X, p.Y, zoom)
 
 		// Check if point is within bounds
@@ -361,32 +567,15 @@ func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
 		}
 	}
 
-	fmt.Printf("Found %d points within bounds\n", len(points))
-
-	// Calculate clustering radius for this zoom level
+	// Calculate clustering radius
 	zoomFactor := math.Pow(2, float64(sc.Options.MaxZoom-zoom))
 	radius := float32(sc.Options.Radius * zoomFactor / float64(sc.Options.Extent))
 
-	fmt.Printf("Clustering radius: %f\n", radius)
-
-	// Cluster the points using projected coordinates
-	var projectedPoints []KDPoint
-	for _, p := range points {
-		proj := sc.projectFast(p.X, p.Y, zoom)
-		projectedPoints = append(projectedPoints, KDPoint{
-			X:         proj[0],
-			Y:         proj[1],
-			ID:        p.ID,
-			NumPoints: p.NumPoints,
-			Metrics:   p.Metrics,
-		})
-	}
-
-	// Cluster the projected points
+	// Project and cluster points
+	projectedPoints := sc.projectPoints(points, zoom, sc.Tree.Pool)
 	clusters := sc.clusterPoints(projectedPoints, radius)
-	fmt.Printf("Created %d clusters\n", len(clusters))
 
-	// Convert cluster coordinates back to lng/lat
+	// Convert back to lng/lat
 	for i := range clusters {
 		unproj := sc.unprojectFast(clusters[i].X, clusters[i].Y, zoom)
 		clusters[i].X = unproj[0]
@@ -394,6 +583,26 @@ func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
 	}
 
 	return clusters
+}
+
+func (sc *Supercluster) projectPoints(points []KDPoint, zoom int, metricsPool *MetricsPool) []KDPoint {
+	projectedPoints := make([]KDPoint, 0, len(points))
+
+	for _, p := range points {
+		proj := sc.projectFast(p.X, p.Y, zoom)
+
+		// Create projected point keeping the same MetricIdx
+		projectedPoints = append(projectedPoints, KDPoint{
+			X:         proj[0],
+			Y:         proj[1],
+			ID:        p.ID,
+			NumPoints: p.NumPoints,
+			MetricIdx: p.MetricIdx, // Keep the same metrics index
+			Metadata:  p.Metadata,  // Keep metadata if needed for clustering
+		})
+	}
+
+	return projectedPoints
 }
 
 func (sc *Supercluster) clusterPoints(points []KDPoint, radius float32) []ClusterNode {
@@ -421,11 +630,9 @@ func (sc *Supercluster) clusterPoints(points []KDPoint, radius float32) []Cluste
 			}
 		}
 
-		fmt.Printf("Point %d has %d nearby points\n", p.ID, len(nearby))
-
 		// If we have enough points, create a cluster
 		if len(nearby) >= sc.Options.MinPoints {
-			cluster := createCluster(append(nearby, p))
+			cluster := createCluster(append(nearby, p), sc.Tree.Pool)
 			clusters = append(clusters, cluster)
 
 			// Mark points as processed
@@ -435,12 +642,13 @@ func (sc *Supercluster) clusterPoints(points []KDPoint, radius float32) []Cluste
 			processed[p.ID] = true
 		} else {
 			// Add as individual point
+			pointMetrics := sc.Tree.Pool.Get(p.MetricIdx)
 			clusters = append(clusters, ClusterNode{
 				ID:      p.ID,
 				X:       p.X,
 				Y:       p.Y,
 				Count:   1,
-				Metrics: ClusterMetrics{Values: p.Metrics},
+				Metrics: ClusterMetrics{Values: pointMetrics},
 			})
 			processed[p.ID] = true
 		}
@@ -450,10 +658,14 @@ func (sc *Supercluster) clusterPoints(points []KDPoint, radius float32) []Cluste
 	return clusters
 }
 
-func createCluster(points []KDPoint) ClusterNode {
+func createCluster(points []KDPoint, metricsPool *MetricsPool) ClusterNode {
 	var sumX, sumY float64
 	metrics := make(map[string]float64)
 	var totalPoints uint32
+
+	// Create a map to aggregate metadata
+	metadata := make(map[string]interface{})
+	metadataCounts := make(map[string]int)
 
 	// Accumulate values
 	for _, p := range points {
@@ -462,8 +674,22 @@ func createCluster(points []KDPoint) ClusterNode {
 		sumY += float64(p.Y) * weight
 		totalPoints += p.NumPoints
 
-		for k, v := range p.Metrics {
-			metrics[k] += float64(v) * weight
+		// Get metrics from pool and accumulate
+		if pointMetrics := metricsPool.Get(p.MetricIdx); pointMetrics != nil {
+			for k, v := range pointMetrics {
+				metrics[k] += float64(v) * weight
+			}
+		}
+
+		// Aggregate metadata
+		for k, v := range p.Metadata {
+			key := fmt.Sprintf("%s:%v", k, v)
+			metadataCounts[key]++
+
+			// Store the actual key-value pair
+			if metadataCounts[key] == 1 {
+				metadata[k] = v
+			}
 		}
 	}
 
@@ -477,6 +703,7 @@ func createCluster(points []KDPoint) ClusterNode {
 		Metrics: ClusterMetrics{
 			Values: make(map[string]float32),
 		},
+		Metadata: make(map[string]json.RawMessage),
 	}
 
 	// Average metrics
@@ -484,33 +711,19 @@ func createCluster(points []KDPoint) ClusterNode {
 		cluster.Metrics.Values[k] = float32(sum * invTotal)
 	}
 
+	// Add metadata to cluster
+	// Only keep metadata values that appear in all points
+	for k, v := range metadata {
+		if metadataCounts[fmt.Sprintf("%s:%v", k, v)] == len(points) {
+			// Convert to json.RawMessage
+			jsonBytes, err := json.Marshal(v)
+			if err == nil {
+				cluster.Metadata[k] = jsonBytes
+			}
+		}
+	}
+
 	return cluster
-}
-
-// Add necessary existing types and helper functions
-type Point struct {
-	ID       uint32
-	X, Y     float32
-	Metrics  map[string]float32
-	Metadata map[string]interface{}
-}
-
-// Modify KDPoint to be more memory efficient
-type KDPoint struct {
-	X, Y      float32            // 8 bytes
-	ID        uint32             // 4 bytes
-	ParentID  uint32             // 4 bytes
-	NumPoints uint32             // 4 bytes
-	Metrics   map[string]float32 // Change back to map for compatibility
-}
-
-type ClusterNode struct {
-	ID       uint32
-	X, Y     float32
-	Count    uint32
-	Children []uint32
-	Metrics  ClusterMetrics
-	Metadata map[string]json.RawMessage
 }
 
 type ClusterMetrics struct {
@@ -558,336 +771,217 @@ func (sc *Supercluster) unprojectFast(x, y float32, zoom int) [2]float32 {
 	return [2]float32{lng, lat}
 }
 
-//SaveCompressed saves the KDTree to a zstd compressed file
-func (t *KDTree) SaveCompressed(filename string) error {
-	file, err := os.Create(filename)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %v", err)
-	}
-	defer file.Close()
-
-	// Create zstd writer
-	enc, err := zstd.NewWriter(file)
-	if err != nil {
-		return fmt.Errorf("failed to create zstd writer: %v", err)
-	}
-	defer enc.Close()
-
-	// Create gob encoder
-	gobEnc := gob.NewEncoder(enc)
-
-	serialTree := struct {
-		Points   []KDPoint
-		NodeSize int
-		Bounds   KDBounds
-		Root     *KDNode
-	}{
-		Points:   t.Points,
-		NodeSize: t.NodeSize,
-		Bounds:   t.Bounds,
-		Root:     t.Root,
-	}
-
-	if err := gobEnc.Encode(serialTree); err != nil {
-		return fmt.Errorf("failed to encode tree: %v", err)
-	}
-
-	return nil
-}
-
-// LoadCompressed loads a KDTree from a zstd compressed file
-func LoadCompressedKDTree(filename string) (*KDTree, error) {
-	file, err := os.Open(filename)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %v", err)
-	}
-	defer file.Close()
-
-	// Create zstd reader
-	dec, err := zstd.NewReader(file)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create zstd reader: %v", err)
-	}
-	defer dec.Close()
-
-	// Create gob decoder
-	gobDec := gob.NewDecoder(dec)
-
-	var serialTree struct {
-		Points   []KDPoint
-		NodeSize int
-		Bounds   KDBounds
-		Root     *KDNode
-	}
-
-	if err := gobDec.Decode(&serialTree); err != nil {
-		return nil, fmt.Errorf("failed to decode tree: %v", err)
-	}
-
-	return &KDTree{
-		Points:   serialTree.Points,
-		NodeSize: serialTree.NodeSize,
-		Bounds:   serialTree.Bounds,
-		Root:     serialTree.Root,
-	}, nil
-}
-
-// SaveCompressed saves the Supercluster to a zstd compressed file
-// func (sc *Supercluster) SaveCompressed(filename string) error {
-// 	fmt.Printf("Attempting to save cluster to %s\n", filename)
-// 	// Create the file
-// 	file, err := os.Create(filename)
-// 	if err != nil {
-// 		return fmt.Errorf("failed to create file: %v", err)
-// 	}
-// 	defer file.Close()
-
-// 	// Create zstd writer
-// 	enc, err := zstd.NewWriter(file)
-// 	if err != nil {
-// 		return fmt.Errorf("failed to create zstd writer: %v", err)
-// 	}
-// 	defer enc.Close()
-
-// 	// Create encoder
-// 	gobEnc := gob.NewEncoder(enc)
-
-// 	// Create a serializable version of the supercluster
-// 	serialCluster := struct {
-// 		Tree    *KDTree
-// 		Points  []Point
-// 		Options SuperclusterOptions
-// 	}{
-// 		Tree:    sc.Tree,
-// 		Points:  sc.Points,
-// 		Options: sc.Options,
-// 	}
-
-// 	fmt.Printf("Serializing cluster with %d points\n", len(serialCluster.Points))
-
-// 	// Encode the cluster
-// 	if err := gobEnc.Encode(serialCluster); err != nil {
-// 		return fmt.Errorf("failed to encode cluster: %v", err)
-// 	}
-
-// 	// Verify file was written
-// 	if info, err := os.Stat(filename); err == nil {
-// 		fmt.Printf("Successfully wrote cluster file: %s (size: %d bytes)\n", filename, info.Size())
-// 	} else {
-// 		fmt.Printf("Error verifying saved file: %v\n", err)
-// 	}
-
-// 	return nil
-// }
-
-// LoadCompressedSupercluster loads a Supercluster from a zstd compressed file
-func LoadCompressedSupercluster(filename string) (*Supercluster, error) {
-	fmt.Printf("Starting to load cluster from %s\n", filename)
-
-	// Open the file
-	file, err := os.Open(filename)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %v", err)
-	}
-	defer file.Close()
-
-	// Create buffered reader
-	bufReader := bufio.NewReaderSize(file, 1024*1024) // 1MB buffer
-
-	// Create zstd reader with options for memory usage
-	dec, err := zstd.NewReader(bufReader,
-		zstd.WithDecoderLowmem(true),
-		zstd.WithDecoderMaxMemory(1024*1024*1024)) // 1GB max memory
-	if err != nil {
-		return nil, fmt.Errorf("failed to create zstd reader: %v", err)
-	}
-	defer dec.Close()
-
-	// Create decoder
-	gobDec := gob.NewDecoder(dec)
-
-	// Create a serializable version of the supercluster
-	var serialCluster struct {
-		Tree    *KDTree
-		Points  []Point
-		Options SuperclusterOptions
-	}
-
-	fmt.Printf("Starting to decode cluster...\n")
-	memBefore := runtime.MemStats{}
-	runtime.ReadMemStats(&memBefore)
-
-	// Decode the cluster
-	if err := gobDec.Decode(&serialCluster); err != nil {
-		return nil, fmt.Errorf("failed to decode cluster: %v", err)
-	}
-
-	memAfter := runtime.MemStats{}
-	runtime.ReadMemStats(&memAfter)
-
-	fmt.Printf("Memory used for loading: %d MB\n",
-		(memAfter.Alloc-memBefore.Alloc)/1024/1024)
-	fmt.Printf("Loaded cluster with %d points\n", len(serialCluster.Points))
-
-	// Create and return the supercluster
-	cluster := &Supercluster{
-		Tree:    serialCluster.Tree,
-		Points:  serialCluster.Points,
-		Options: serialCluster.Options,
-	}
-
-	// Periodically force GC during loading
-	defer runtime.GC()
-
-	// Use a timer to periodically clean up
-	cleanup := time.NewTicker(5 * time.Second)
-	defer cleanup.Stop()
-
-	go func() {
-		for range cleanup.C {
-			runtime.GC()
-			debug.FreeOSMemory()
-		}
-	}()
-
-	return cluster, nil
-}
-
-// Add this function to help with memory management
-func (sc *Supercluster) CleanupCluster() {
-	if sc != nil {
-		sc.Tree = nil
-		sc.Points = nil
-		// Force garbage collection after clearing large data structures
-		runtime.GC()
-	}
-}
-
-func (sc *Supercluster) GetMemoryStats() string {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-
-	return fmt.Sprintf(
-		"Memory Stats:\n"+
-			"Allocated: %v MB\n"+
-			"Total Allocated: %v MB\n"+
-			"System Memory: %v MB\n"+
-			"Number of GC: %v\n",
-		m.Alloc/1024/1024,
-		m.TotalAlloc/1024/1024,
-		m.Sys/1024/1024,
-		m.NumGC,
-	)
-}
-
-// Add a new function to load points in batches
-func LoadPointsBatch(reader io.Reader, batchSize int) ([]Point, error) {
-	points := make([]Point, 0, batchSize)
-	decoder := gob.NewDecoder(reader)
-
-	for i := 0; i < batchSize; i++ {
-		var point Point
-		err := decoder.Decode(&point)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-		points = append(points, point)
-	}
-
-	return points, nil
-}
-
-// Add new batch loading function
-func LoadCompressedSuperclusterBatch(filename string, batchSize int) (*Supercluster, error) {
-	fmt.Printf("Starting to load cluster from %s in batches\n", filename)
-
-	file, err := os.Open(filename)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %v", err)
-	}
-	defer file.Close()
-
-	bufReader := bufio.NewReaderSize(file, 1024*1024)
-	dec, err := zstd.NewReader(bufReader,
-		zstd.WithDecoderLowmem(true),
-		zstd.WithDecoderMaxMemory(1024*1024*1024))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create zstd reader: %v", err)
-	}
-	defer dec.Close()
-
-	gobDec := gob.NewDecoder(dec)
-
-	// First read the header/options
-	var options SuperclusterOptions
-	if err := gobDec.Decode(&options); err != nil {
-		return nil, fmt.Errorf("failed to decode options: %v", err)
-	}
-
-	cluster := NewSupercluster(options)
-
-	// Read points in batches
-	var points []Point
-	for {
-		batch := make([]Point, 0, batchSize)
-		for i := 0; i < batchSize; i++ {
-			var point Point
-			if err := gobDec.Decode(&point); err != nil {
-				if err == io.EOF {
-					break
-				}
-				return nil, fmt.Errorf("failed to decode point: %v", err)
-			}
-			batch = append(batch, point)
-		}
-
-		if len(batch) == 0 {
-			break
-		}
-
-		points = append(points, batch...)
-
-		// Force GC after each batch
-		runtime.GC()
-		debug.FreeOSMemory()
-	}
-
-	// Load points into cluster
-	cluster.Load(points)
-
-	return cluster, nil
-}
-
-// Modify SaveCompressed to support batch loading format
 func (sc *Supercluster) SaveCompressed(filename string) error {
-	file, err := os.Create(filename)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %v", err)
-	}
-	defer file.Close()
+    file, err := os.Create(filename)
+    if err != nil {
+        return fmt.Errorf("failed to create file: %v", err)
+    }
+    defer file.Close()
 
-	enc, err := zstd.NewWriter(file)
-	if err != nil {
-		return fmt.Errorf("failed to create zstd writer: %v", err)
-	}
-	defer enc.Close()
+    bufWriter := bufio.NewWriterSize(file, 1024*1024)
+    enc, err := zstd.NewWriter(bufWriter,
+        zstd.WithEncoderLevel(zstd.SpeedBestCompression))
+    if err != nil {
+        return fmt.Errorf("failed to create zstd writer: %v", err)
+    }
+    defer enc.Close()
 
-	gobEnc := gob.NewEncoder(enc)
+    // Write sizes first for allocation
+    binary.Write(enc, binary.LittleEndian, uint32(len(sc.Tree.Nodes)))
+    binary.Write(enc, binary.LittleEndian, uint32(len(sc.Tree.Points)))
+    binary.Write(enc, binary.LittleEndian, uint32(len(sc.Tree.Pool.Metrics)))
+    
+    // Write Options
+    binary.Write(enc, binary.LittleEndian, sc.Options.MinZoom)
+    binary.Write(enc, binary.LittleEndian, sc.Options.MaxZoom)
+    binary.Write(enc, binary.LittleEndian, sc.Options.MinPoints)
+    binary.Write(enc, binary.LittleEndian, float64(sc.Options.Radius))
+    binary.Write(enc, binary.LittleEndian, sc.Options.NodeSize)
+    binary.Write(enc, binary.LittleEndian, sc.Options.Extent)
 
-	// First write options
-	if err := gobEnc.Encode(sc.Options); err != nil {
-		return fmt.Errorf("failed to encode options: %v", err)
-	}
+    // Write nodes
+    for _, node := range sc.Tree.Nodes {
+        binary.Write(enc, binary.LittleEndian, node.PointIdx)
+        binary.Write(enc, binary.LittleEndian, node.Left)
+        binary.Write(enc, binary.LittleEndian, node.Right)
+        binary.Write(enc, binary.LittleEndian, node.Axis)
+        binary.Write(enc, binary.LittleEndian, node.MinChild)
+        binary.Write(enc, binary.LittleEndian, node.MaxChild)
+    }
 
-	// Then write points
-	for _, point := range sc.Points {
-		if err := gobEnc.Encode(point); err != nil {
-			return fmt.Errorf("failed to encode point: %v", err)
-		}
-	}
+    // Write points
+    for _, point := range sc.Tree.Points {
+        binary.Write(enc, binary.LittleEndian, point.X)
+        binary.Write(enc, binary.LittleEndian, point.Y)
+        binary.Write(enc, binary.LittleEndian, point.ID)
+        binary.Write(enc, binary.LittleEndian, point.NumPoints)
+        binary.Write(enc, binary.LittleEndian, point.MetricIdx)
+        
+        // Write metadata size
+        binary.Write(enc, binary.LittleEndian, uint32(len(point.Metadata)))
+        
+        // Write each metadata key-value pair
+        for k, v := range point.Metadata {
+            // Write key
+            keyBytes := []byte(k)
+            binary.Write(enc, binary.LittleEndian, uint32(len(keyBytes)))
+            enc.Write(keyBytes)
+            
+            // Convert value to JSON bytes
+            valueBytes, err := json.Marshal(v)
+            if err != nil {
+                return fmt.Errorf("failed to marshal metadata value: %v", err)
+            }
+            
+            // Write value
+            binary.Write(enc, binary.LittleEndian, uint32(len(valueBytes)))
+            enc.Write(valueBytes)
+        }
+    }
 
-	return nil
+    // Write metrics
+    for _, metrics := range sc.Tree.Pool.Metrics {
+        binary.Write(enc, binary.LittleEndian, uint32(len(metrics)))
+        for k, v := range metrics {
+            binary.Write(enc, binary.LittleEndian, uint32(len(k)))
+            enc.Write([]byte(k))
+            binary.Write(enc, binary.LittleEndian, v)
+        }
+    }
+
+    if err := enc.Close(); err != nil {
+        return fmt.Errorf("failed to close encoder: %v", err)
+    }
+
+    if err := bufWriter.Flush(); err != nil {
+        return fmt.Errorf("failed to flush buffer: %v", err)
+    }
+
+    return nil
+}
+
+func LoadCompressedSupercluster(filename string) (*Supercluster, error) {
+    start := time.Now()
+    file, err := os.Open(filename)
+    if err != nil {
+        return nil, fmt.Errorf("failed to open file: %v", err)
+    }
+    defer file.Close()
+
+    bufReader := bufio.NewReaderSize(file, 1024*1024)
+    dec, err := zstd.NewReader(bufReader)
+    if err != nil {
+        return nil, fmt.Errorf("failed to create zstd reader: %v", err)
+    }
+    defer dec.Close()
+
+    // Read sizes
+    var numNodes, numPoints, numMetrics uint32
+    binary.Read(dec, binary.LittleEndian, &numNodes)
+    binary.Read(dec, binary.LittleEndian, &numPoints)
+    binary.Read(dec, binary.LittleEndian, &numMetrics)
+
+    // Read options
+    var options SuperclusterOptions
+    binary.Read(dec, binary.LittleEndian, &options.MinZoom)
+    binary.Read(dec, binary.LittleEndian, &options.MaxZoom)
+    binary.Read(dec, binary.LittleEndian, &options.MinPoints)
+    binary.Read(dec, binary.LittleEndian, &options.Radius)
+    binary.Read(dec, binary.LittleEndian, &options.NodeSize)
+    binary.Read(dec, binary.LittleEndian, &options.Extent)
+
+    // Create cluster with options
+    sc := NewSupercluster(options)
+
+    // Read nodes
+    nodes := make([]KDNode, numNodes)
+    for i := range nodes {
+        binary.Read(dec, binary.LittleEndian, &nodes[i].PointIdx)
+        binary.Read(dec, binary.LittleEndian, &nodes[i].Left)
+        binary.Read(dec, binary.LittleEndian, &nodes[i].Right)
+        binary.Read(dec, binary.LittleEndian, &nodes[i].Axis)
+        binary.Read(dec, binary.LittleEndian, &nodes[i].MinChild)
+        binary.Read(dec, binary.LittleEndian, &nodes[i].MaxChild)
+    }
+
+    fmt.Printf("Nodes read took: %v\n", time.Since(start))
+    pointsStart := time.Now()
+
+    // Read points
+    points := make([]KDPoint, numPoints)
+    for i := range points {
+        binary.Read(dec, binary.LittleEndian, &points[i].X)
+        binary.Read(dec, binary.LittleEndian, &points[i].Y)
+        binary.Read(dec, binary.LittleEndian, &points[i].ID)
+        binary.Read(dec, binary.LittleEndian, &points[i].NumPoints)
+        binary.Read(dec, binary.LittleEndian, &points[i].MetricIdx)
+        
+        // Read metadata
+        var metadataSize uint32
+        binary.Read(dec, binary.LittleEndian, &metadataSize)
+        
+        points[i].Metadata = make(map[string]interface{}, metadataSize)
+        
+        // Read each metadata key-value pair
+        for j := uint32(0); j < metadataSize; j++ {
+            // Read key
+            var keySize uint32
+            binary.Read(dec, binary.LittleEndian, &keySize)
+            keyBytes := make([]byte, keySize)
+            io.ReadFull(dec, keyBytes)
+            
+            // Read value
+            var valueSize uint32
+            binary.Read(dec, binary.LittleEndian, &valueSize)
+            valueBytes := make([]byte, valueSize)
+            io.ReadFull(dec, valueBytes)
+            
+            // Unmarshal value
+            var value interface{}
+            if err := json.Unmarshal(valueBytes, &value); err != nil {
+                return nil, fmt.Errorf("failed to unmarshal metadata value: %v", err)
+            }
+            
+            points[i].Metadata[string(keyBytes)] = value
+        }
+    }
+
+    fmt.Printf("Points read took: %v\n", time.Since(pointsStart))
+    metricsStart := time.Now()
+
+    // Read metrics pool
+    metricsPool := NewMetricsPool()
+    metricsPool.Metrics = make([]map[string]float32, numMetrics)
+    
+    for i := range metricsPool.Metrics {
+        var numPairs uint32
+        binary.Read(dec, binary.LittleEndian, &numPairs)
+        
+        metrics := make(map[string]float32, numPairs)
+        for j := uint32(0); j < numPairs; j++ {
+            var keyLen uint32
+            binary.Read(dec, binary.LittleEndian, &keyLen)
+            
+            keyBytes := make([]byte, keyLen)
+            io.ReadFull(dec, keyBytes)
+            
+            var value float32
+            binary.Read(dec, binary.LittleEndian, &value)
+            
+            metrics[string(keyBytes)] = value
+        }
+        metricsPool.Metrics[i] = metrics
+    }
+
+    fmt.Printf("Metrics read took: %v\n", time.Since(metricsStart))
+
+    sc.Tree = &KDTree{
+        Pool:     metricsPool,
+        NodeSize: options.NodeSize,
+        Nodes:    nodes,
+        Points:   points,
+    }
+
+    fmt.Printf("Total load time: %v\n", time.Since(start))
+    return sc, nil
 }

@@ -167,15 +167,26 @@ func NewClusterServer(numPoints int) *ClusterServer {
 
 		fmt.Printf("Creating new supercluster...\n")
 		supercluster := cluster.NewSupercluster(options)
+
+		loadStart := time.Now() // Start timer for Load
 		supercluster.Load(points)
+		loadDuration := time.Since(loadStart) // End timer for Load
+		fmt.Printf("Points loaded in %v\n", loadDuration)
 
 		// Save the cluster after loading with new filename format
 		savePath := generateClusterFilename(numPoints)
 		fmt.Printf("Saving new cluster to %s...\n", savePath)
+		saveStart := time.Now() // Start timer for Save
 		if err := supercluster.SaveCompressed(savePath); err != nil {
 			fmt.Printf("ERROR: Failed to save cluster: %v\n", err)
 		} else {
-			fmt.Printf("Successfully saved new cluster\n")
+			saveDuration := time.Since(saveStart) // End timer for Save
+			if fileInfo, err := os.Stat(savePath); err == nil {
+				fmt.Printf("Successfully saved new cluster in %v (file size: %s)\n",
+					saveDuration, formatFileSize(fileInfo.Size()))
+			} else {
+				fmt.Printf("Successfully saved new cluster in %v\n", saveDuration)
+			}
 		}
 
 		fmt.Printf("=== Finished creating new cluster ===\n")
@@ -275,7 +286,6 @@ func (s *ClusterServer) loadClusterById(id string) error {
 		return err
 	}
 
-	// Find the file with matching ID
 	var clusterFile string
 	for _, file := range files {
 		if strings.Contains(file.Name(), id) {
@@ -288,10 +298,17 @@ func (s *ClusterServer) loadClusterById(id string) error {
 		return fmt.Errorf("cluster with ID %s not found", id)
 	}
 
-	// Load the cluster
+	loadStart := time.Now() // Start timer for LoadCompressedSupercluster
 	loadedCluster, err := cluster.LoadCompressedSupercluster(clusterFile)
+	loadDuration := time.Since(loadStart) // End timer for LoadCompressedSupercluster
+	fmt.Printf("Cluster loaded from file in %v\n", loadDuration)
+
 	if err != nil {
 		return fmt.Errorf("failed to load cluster: %v", err)
+	}
+
+	if loadedCluster == nil {
+		return fmt.Errorf("loaded cluster is nil")
 	}
 
 	s.cluster = loadedCluster
