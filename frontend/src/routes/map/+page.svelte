@@ -19,17 +19,14 @@
                 throw new Error(error.error || 'Failed to load cluster');
             }
             
-            // Trigger map refresh
             mapReloadTrigger++;
             
         } catch (error) {
             console.error('Error loading cluster:', error);
-            // Handle error (show to user)
         }
     }
     
     function handleClusterCreated() {
-        // Increment trigger to force map reload
         mapReloadTrigger += 1;
     }
 
@@ -38,29 +35,59 @@
     }
 </script>
 
-<div class="container">
-    <ClusterSelector
-        apiBaseUrl={API_BASE_URL}
-        on:selectCluster={loadCluster}
-        on:clusterCreated={handleClusterCreated}
-        on:clusterLoaded={handleClusterLoaded}
-    />
+<div class="layout">
+    <aside class="sidebar">
+        <ClusterSelector
+            apiBaseUrl={API_BASE_URL}
+            on:selectCluster={loadCluster}
+            on:clusterCreated={handleClusterCreated}
+            on:clusterLoaded={handleClusterLoaded}
+        />
+    </aside>
     
-    {#if MAPBOX_TOKEN}
-    <ClusterMap
-        mapboxToken={MAPBOX_TOKEN}
-        apiBaseUrl={API_BASE_URL}
-        width="100%"
-        height="600px"
-        reloadTrigger={mapReloadTrigger}
-    />
-     {/if}
+    <main class="main">
+        {#if MAPBOX_TOKEN}
+            <ClusterMap
+                mapboxToken={MAPBOX_TOKEN}
+                apiBaseUrl={API_BASE_URL}
+                width="100%"
+                height="100%"
+                reloadTrigger={mapReloadTrigger}
+            />
+        {/if}
+    </main>
 </div>
 
 <style>
-    .container {
+    .layout {
+        display: grid;
+        grid-template-columns: 400px 1fr;
+        height: 100vh;
+        width: 100vw;
+        overflow: hidden;
+    }
+
+    .sidebar {
+        background: #f5f5f5;
+        overflow-y: auto;
+        border-right: 1px solid #ddd;
         padding: 1rem;
-        max-width: 1200px;
-        margin: 0 auto;
+    }
+
+    .main {
+        position: relative;
+        height: 100%;
+        width: 100%;
+    }
+
+    /* Remove any margin/padding from body */
+    :global(body) {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+    }
+
+    :global(#app) {
+        height: 100vh;
     }
 </style>

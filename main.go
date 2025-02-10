@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/gob"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"testing"
 	"time"
 	"web/clustopher/cluster"
 
@@ -79,7 +77,7 @@ func NewClusterServer(numPoints int) *ClusterServer {
 		}
 
 		fmt.Printf("Generating points in the Continental US...\n")
-		points := generateTestPoints(numPoints, bounds)
+		points := cluster.GenerateTestPoints(numPoints, bounds)
 
 		options := cluster.SuperclusterOptions{
 			MinZoom:   0,
@@ -339,13 +337,21 @@ func main() {
 		// Convert to GeoJSON
 		features := make([]map[string]interface{}, len(clusters))
 		for i, cluster := range clusters {
+			fmt.Printf("Processing cluster/point %d: Count=%d, Has Metrics=%v\n",
+				i, cluster.Count, cluster.Metrics.Values != nil)
+
 			properties := map[string]interface{}{
 				"cluster":     cluster.Count > 1,
 				"point_count": cluster.Count,
+				"id":          cluster.ID,
 			}
 
-			if cluster.Metrics.Values != nil {
+			// Add metrics to properties if they exist
+			if cluster.Metrics.Values != nil && len(cluster.Metrics.Values) > 0 {
+				fmt.Printf("Adding metrics for cluster/point %d: %+v\n", i, cluster.Metrics.Values)
 				properties["metrics"] = cluster.Metrics.Values
+			} else {
+				fmt.Printf("No metrics found for cluster/point %d\n", i)
 			}
 
 			features[i] = map[string]interface{}{
@@ -356,6 +362,11 @@ func main() {
 				},
 				"properties": properties,
 			}
+		}
+
+		// Debug: Print the first feature's properties
+		if len(features) > 0 {
+			fmt.Printf("First feature properties: %+v\n", features[0]["properties"])
 		}
 
 		geojson := map[string]interface{}{
@@ -434,6 +445,55 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "Cluster loaded successfully", "clusterInfo": clusterInfo}) // Return ClusterInfo in response
 	})
 
+	// Add this new handler after your existing /api/clusters endpoint
+	r.GET("/api/clusters/metadata", func(c *gin.Context) {
+		// Parse query parameters
+		zoom, err := strconv.Atoi(c.Query("zoom"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid zoom parameter"})
+			return
+		}
+
+		north, err := strconv.ParseFloat(c.Query("north"), 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid north parameter"})
+			return
+		}
+
+		south, err := strconv.ParseFloat(c.Query("south"), 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid south parameter"})
+			return
+		}
+
+		east, err := strconv.ParseFloat(c.Query("east"), 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid east parameter"})
+			return
+		}
+
+		west, err := strconv.ParseFloat(c.Query("west"), 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid west parameter"})
+			return
+		}
+
+		bounds := cluster.KDBounds{
+			MinX: float32(west),
+			MinY: float32(south),
+			MaxX: float32(east),
+			MaxY: float32(north),
+		}
+
+		// Get clusters for the current view
+		clusters := server.cluster.GetClusters(bounds, zoom)
+
+		// Calculate metadata summaries
+		summary := cluster.CalculateMetadataSummary(clusters)
+
+		c.JSON(http.StatusOK, summary)
+	})
+
 	// Create a channel to listen for interrupt signals
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
@@ -469,100 +529,3 @@ func main() {
 	fmt.Println("Server stopped")
 }
 
-// generateTestPoints creates n random points within specified bounds
-func generateTestPoints(n int, bounds cluster.KDBounds) []cluster.Point {
-	rand.Seed(time.Now().UnixNano())
-	points := make([]cluster.Point, n)
-
-	for i := 0; i < n; i++ {
-		x := bounds.MinX + rand.Float32()*(bounds.MaxX-bounds.MinX)
-		y := bounds.MinY + rand.Float32()*(bounds.MaxY-bounds.MinY)
-
-		points[i] = cluster.Point{
-			ID: uint32(i + 1),
-			X:  x,
-			Y:  y,
-			Metrics: map[string]float32{
-				"value": rand.Float32() * 100,
-				"size":  rand.Float32() * 50,
-			},
-			Metadata: map[string]interface{}{
-				"timestamp": time.Now().Add(-time.Duration(rand.Intn(7*24)) * time.Hour),
-				"category":  []string{"A", "B", "C"}[rand.Intn(3)],
-			},
-		}
-	}
-
-	return points
-}
-
-func TestSupercluster(t *testing.T) {
-	// Test configuration
-	bounds := cluster.KDBounds{
-		MinX: -125.0, // Roughly West Coast of US
-		MinY: 25.0,   // Roughly Southern US border
-		MaxX: -67.0,  // Roughly East Coast of US
-		MaxY: 49.0,   // Roughly Northern US border
-	}
-
-	numPoints := 1000
-	points := generateTestPoints(numPoints, bounds)
-
-	// Initialize cluster with options
-	options := cluster.SuperclusterOptions{
-		MinZoom:   0,
-		MaxZoom:   16,
-		MinPoints: 3,
-		Radius:    40,
-		Extent:    512,
-		NodeSize:  64,
-		Log:       true,
-	}
-
-	cluster := cluster.NewSupercluster(options)
-	cluster.Load(points)
-
-	// Test different zoom levels
-	testZoomLevels := []int{0, 5, 10, 15}
-	for _, zoom := range testZoomLevels {
-		t.Run("TestZoomLevel"+string(rune(zoom+'0')), func(t *testing.T) {
-			clusters := cluster.GetClusters(bounds, zoom)
-
-			// Basic validation
-			if len(clusters) == 0 {
-				t.Errorf("Expected clusters at zoom level %d, got none", zoom)
-			}
-
-			// Validate cluster properties
-			for _, c := range clusters {
-				if c.Count == 0 {
-					t.Errorf("Cluster has zero points at zoom %d", zoom)
-				}
-
-				if c.X < bounds.MinX || c.X > bounds.MaxX || c.Y < bounds.MinY || c.Y > bounds.MaxY {
-					t.Errorf("Cluster at zoom %d is outside bounds: (%f, %f)", zoom, c.X, c.Y)
-				}
-
-				// Check metrics
-				for metricName, value := range c.Metrics.Values {
-					if value < 0 || value > 100 {
-						t.Errorf("Invalid metric value for %s: %f", metricName, value)
-					}
-				}
-			}
-
-			// Verify clustering behavior
-			if zoom == 0 {
-				// At lowest zoom, expect fewer clusters
-				if len(clusters) > numPoints/options.MinPoints {
-					t.Errorf("Too many clusters at zoom 0: %d", len(clusters))
-				}
-			} else if zoom == options.MaxZoom {
-				// At max zoom, expect most points to be unclustered
-				if len(clusters) < numPoints/2 {
-					t.Errorf("Too few clusters at max zoom: %d", len(clusters))
-				}
-			}
-		})
-	}
-}

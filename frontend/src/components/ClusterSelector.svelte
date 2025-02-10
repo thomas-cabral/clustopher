@@ -22,6 +22,7 @@
         numPoints: number;
         timestamp: string;
         fileSize: number;
+        metrics?: { [key: string]: number };
     }
     
     async function loadClusters() {
@@ -93,6 +94,27 @@
             
             const responseData: { message: string, clusterInfo: ClusterInfo } = await response.json();
             loadedClusterInfo = responseData.clusterInfo;
+            
+            // Fetch initial metrics for the whole dataset
+            const bounds = {
+                north: 90,
+                south: -90,
+                east: 180,
+                west: -180,
+                zoom: 0
+            };
+            
+            const metricsResponse = await fetch(
+                `${apiBaseUrl}/api/clusters?zoom=0&north=90&south=-90&east=180&west=-180`
+            );
+            
+            if (metricsResponse.ok) {
+                const data = await metricsResponse.json();
+                if (data.features?.[0]?.properties?.metrics) {
+                    loadedClusterInfo.metrics = data.features[0].properties.metrics;
+                }
+            }
+            
             dispatch('clusterLoaded');
             loadedClusterId = clusterId;
             
@@ -104,97 +126,217 @@
         }
     }
     
+    function formatMetricName(name: string): string {
+        return name
+            .split('_')
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+            .join(' ');
+    }
+
+    function formatMetricValue(value: number): string {
+        if (value >= 1000000) {
+            return (value / 1000000).toFixed(1) + 'M';
+        } else if (value >= 1000) {
+            return (value / 1000).toFixed(1) + 'K';
+        } else {
+            return value.toFixed(1);
+        }
+    }
+    
     // Load clusters on mount
     onMount(loadClusters);
 </script>
 
 <div class="cluster-selector">
-    <div class="header">
-        <h3>Cluster Management</h3>
-        <button class="refresh" on:click={loadClusters} disabled={loading}>
-            🔄 Refresh
-        </button>
-    </div>
-    
-    <div class="new-cluster">
-        <h4>Create New Cluster</h4>
-        <input
-            type="number"
-            bind:value={newClusterPoints}
-            placeholder="Number of points"
-            min="1"
-            disabled={loading}
-        />
-        <button on:click={createNewCluster} disabled={loading}>
-            {loading ? 'Creating...' : 'Create New Cluster'}
-        </button>
-    </div>
-    
-    {#if error}
-        <div class="error">{error}</div>
-    {/if}
-    
-    {#if loading}
-        <div class="loading">Loading...</div>
-    {:else}
-        <h4>Available Clusters</h4>
-        <div class="clusters-list">
-            {#each clusters as cluster}
-                <div class="cluster-item">
-                    <div class="cluster-info">
-                        <span class="points">{cluster.numPoints.toLocaleString()} points</span>
-                        <span class="timestamp">
-                            {new Date(cluster.timestamp).toLocaleString()}
-                        </span>
-                        <span class="size">
-                            {(cluster.fileSize / (1024 * 1024)).toFixed(1)} MB
-                        </span>
-                    </div>
-                    <button class="load-button"
-                        on:click={() => loadCluster(cluster.id)}
-                        disabled={loading || cluster.id === loadedClusterId}
-                    >
-                        Load
-                    </button>
-                </div>
-            {/each}
-            {#if clusters.length === 0}
-                <div class="no-clusters">No saved clusters found</div>
-            {/if}
+    <div class="controls-section">
+        <div class="header">
+            <h3>Cluster Management</h3>
+            <button class="refresh" on:click={loadClusters} disabled={loading}>
+                🔄 Refresh
+            </button>
         </div>
-    {/if}
+        
+        <div class="new-cluster">
+            <input
+                type="number"
+                bind:value={newClusterPoints}
+                placeholder="Number of points"
+                min="1"
+                disabled={loading}
+            />
+            <button on:click={createNewCluster} disabled={loading}>
+                {loading ? 'Creating...' : 'Create New Cluster'}
+            </button>
+        </div>
+        
+        {#if error}
+            <div class="error">{error}</div>
+        {/if}
+    </div>
 
-    {#if loadedClusterInfo}
+    <div class="clusters-section">
+        <h4>Available Clusters</h4>
+        {#if loading}
+            <div class="loading">Loading...</div>
+        {:else}
+            <div class="clusters-list">
+                {#each clusters as cluster}
+                    <div class="cluster-item {cluster.id === loadedClusterId ? 'active' : ''}">
+                        <div class="cluster-info">
+                            <div class="cluster-main">
+                                <span class="points">{cluster.numPoints.toLocaleString()} points</span>
+                                <button class="load-button"
+                                    on:click={() => loadCluster(cluster.id)}
+                                    disabled={loading || cluster.id === loadedClusterId}
+                                >
+                                    {cluster.id === loadedClusterId ? 'Loaded' : 'Load'}
+                                </button>
+                            </div>
+                            <div class="cluster-details">
+                                <span class="timestamp">{new Date(cluster.timestamp).toLocaleString()}</span>
+                                <span class="size">{(cluster.fileSize / (1024 * 1024)).toFixed(1)} MB</span>
+                            </div>
+                        </div>
+                    </div>
+                {/each}
+                {#if clusters.length === 0}
+                    <div class="no-clusters">No saved clusters found</div>
+                {/if}
+            </div>
+        {/if}
+    </div>
+
+    {#if loadedClusterInfo && loadedClusterInfo.metrics}
         <div class="loaded-cluster-info">
-            <h4>Loaded Cluster</h4>
-            <p><strong>ID:</strong> {loadedClusterInfo.id}</p>
-            <p><strong>Points:</strong> {loadedClusterInfo.numPoints.toLocaleString()}</p>
-            <p><strong>Timestamp:</strong> {new Date(loadedClusterInfo.timestamp).toLocaleString()}</p>
-            <p><strong>File Size:</strong> {(loadedClusterInfo.fileSize / (1024 * 1024)).toFixed(1)} MB</p>
+            <h4>Current Cluster Metrics</h4>
+            <div class="metrics-grid">
+                {#each Object.entries(loadedClusterInfo.metrics) as [metric, value]}
+                    <div class="metric-item">
+                        <label>{formatMetricName(metric)}:</label>
+                        <span>{formatMetricValue(value)}</span>
+                    </div>
+                {/each}
+            </div>
         </div>
     {/if}
 </div>
 
 <style>
     .cluster-selector {
-        padding: 1rem;
-        background: #f5f5f5;
-        border-radius: 8px;
-        margin-bottom: 1rem;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        height: 100%;
     }
-    
+
+    .controls-section {
+        padding-bottom: 1rem;
+        border-bottom: 1px solid #ddd;
+    }
+
     .header {
         display: flex;
         justify-content: space-between;
         align-items: center;
         margin-bottom: 1rem;
     }
-    
-    h4 {
-        margin: 1rem 0 0.5rem 0;
+
+    .new-cluster {
+        display: grid;
+        grid-template-columns: 2fr 1fr;
+        gap: 0.5rem;
+        align-items: center;
+    }
+
+    .clusters-section {
+        flex: 1;
+        overflow-y: auto;
+        min-height: 0;
+    }
+
+    .clusters-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+
+    .cluster-item {
+        background: white;
+        padding: 0.5rem;
+        border-radius: 4px;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        transition: background-color 0.2s;
+    }
+
+    .cluster-item.active {
+        background: #f0f7ff;
+        border: 1px solid #4a90e2;
+    }
+
+    .cluster-info {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+    }
+
+    .cluster-main {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .cluster-details {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.8rem;
         color: #666;
     }
-    
+
+    .points {
+        font-weight: 500;
+        color: #333;
+    }
+
+    .loaded-cluster-info {
+        padding: 1rem;
+        background: white;
+        border-radius: 4px;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        margin-top: auto;
+    }
+
+    .loaded-cluster-info h4 {
+        margin: 0 0 0.75rem 0;
+        color: #333;
+        font-size: 1rem;
+    }
+
+    .metrics-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 0.5rem;
+    }
+
+    .metric-item {
+        display: flex;
+        flex-direction: column;
+        background: #f5f5f5;
+        padding: 0.5rem;
+        border-radius: 4px;
+    }
+
+    .metric-item label {
+        font-size: 0.8rem;
+        color: #666;
+        margin-bottom: 0.25rem;
+    }
+
+    .metric-item span {
+        font-size: 1.1rem;
+        font-weight: 500;
+        color: #333;
+    }
+
     .refresh {
         padding: 0.25rem 0.5rem;
         background: transparent;
@@ -205,33 +347,6 @@
     .refresh:hover {
         background: #4a90e2;
         color: white;
-    }
-    
-    .new-cluster {
-        display: flex;
-        gap: 1rem;
-        margin-bottom: 1rem;
-    }
-    
-    .clusters-list {
-        display: flex;
-        flex-direction: column;
-        gap: 0.5rem;
-    }
-    
-    .cluster-item {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 0.5rem;
-        background: white;
-        border-radius: 4px;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
-    }
-    
-    .cluster-info {
-        display: flex;
-        gap: 1rem;
     }
     
     .error {
@@ -268,26 +383,12 @@
     }
     
     .load-button {
+        padding: 0.25rem 0.75rem;
+        font-size: 0.9rem;
         background: #4CAF50;
     }
     
-    .load-button:hover {
-        background: #45a049;
-    }
-
-    .loaded-cluster-info {
-        margin-top: 1rem;
-        padding: 1rem;
-        background: white;
-        border-radius: 4px;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
-    }
-
-    .loaded-cluster-info h4 {
-        margin-top: 0;
-    }
-
-    .loaded-cluster-info p {
-        margin: 0.25rem 0;
+    .load-button:disabled {
+        background: #4a90e2;
     }
 </style> 

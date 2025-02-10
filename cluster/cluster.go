@@ -671,7 +671,15 @@ func createCluster(points []KDPoint, metricsPool *MetricsPool) ClusterNode {
 		// Get metrics from pool and accumulate
 		if pointMetrics := metricsPool.Get(p.MetricIdx); pointMetrics != nil {
 			for k, v := range pointMetrics {
-				metrics[k] += float64(v) * weight
+				// Don't multiply by weight since the metrics are already weighted
+				// when stored in the pool for clusters
+				if p.NumPoints == 1 {
+					// Only multiply by weight for individual points
+					metrics[k] += float64(v) * weight
+				} else {
+					// For clusters, the metrics are already weighted
+					metrics[k] += float64(v)
+				}
 			}
 		}
 
@@ -687,7 +695,7 @@ func createCluster(points []KDPoint, metricsPool *MetricsPool) ClusterNode {
 		}
 	}
 
-	// Calculate averages
+	// Calculate position averages only (not metrics)
 	invTotal := 1.0 / float64(totalPoints)
 	cluster := ClusterNode{
 		ID:    uuid.New().ID(),
@@ -700,9 +708,9 @@ func createCluster(points []KDPoint, metricsPool *MetricsPool) ClusterNode {
 		Metadata: make(map[string]json.RawMessage),
 	}
 
-	// Average metrics
+	// Store summed metrics (not averaged)
 	for k, sum := range metrics {
-		cluster.Metrics.Values[k] = float32(sum * invTotal)
+		cluster.Metrics.Values[k] = float32(sum)
 	}
 
 	// Add metadata to cluster
