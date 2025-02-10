@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/gob"
-	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -29,51 +28,6 @@ func init() {
 }
 
 const CLUSTER_SAVE_DIR = "data/clusters"
-
-// Example usage
-func ExportClustersToFile(filename string) error {
-	// Setup your cluster as before
-	bounds := cluster.KDBounds{
-		MinX: -125.0, // Roughly West Coast of US
-		MinY: 25.0,   // Roughly Southern US border
-		MaxX: -67.0,  // Roughly East Coast of US
-		MaxY: 49.0,   // Roughly Northern US border
-	}
-
-	points := generateTestPoints(3000000, bounds)
-	options := cluster.SuperclusterOptions{
-		MinZoom:   0,
-		MaxZoom:   16,
-		MinPoints: 2,
-		Radius:    100,
-		Extent:    512,
-		NodeSize:  64,
-	}
-
-	cluster := cluster.NewSupercluster(options)
-	cluster.Load(points)
-
-	// Convert to GeoJSON
-	geojson, err := cluster.ToGeoJSON(bounds, 10) // Zoom level 10 for example
-	if err != nil {
-		return fmt.Errorf("failed to convert to GeoJSON: %v", err)
-	}
-
-	// Write to file
-	file, err := os.Create(filename)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %v", err)
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(geojson); err != nil {
-		return fmt.Errorf("failed to encode GeoJSON: %v", err)
-	}
-
-	return nil
-}
 
 type ClusterServer struct {
 	cluster *cluster.Supercluster
@@ -104,34 +58,6 @@ func generateClusterFilename(size int) string {
 	timestamp := time.Now().Format("20060102-150405")
 	id := uuid.New().String()[:8] // Use first 8 chars of UUID for brevity
 	return filepath.Join(CLUSTER_SAVE_DIR, fmt.Sprintf("cluster-%dp-%s-%s.zst", size, timestamp, id))
-}
-
-func findLatestClusterFile() (string, error) {
-	files, err := os.ReadDir(CLUSTER_SAVE_DIR)
-	if err != nil {
-		return "", err
-	}
-
-	var latest string
-	var latestTime time.Time
-
-	for _, file := range files {
-		if !file.IsDir() && filepath.Ext(file.Name()) == ".zst" {
-			info, err := file.Info()
-			if err != nil {
-				continue
-			}
-			if latest == "" || info.ModTime().After(latestTime) {
-				latest = filepath.Join(CLUSTER_SAVE_DIR, file.Name())
-				latestTime = info.ModTime()
-			}
-		}
-	}
-
-	if latest == "" {
-		return "", fmt.Errorf("no cluster files found")
-	}
-	return latest, nil
 }
 
 func NewClusterServer(numPoints int) *ClusterServer {
@@ -210,6 +136,9 @@ type ClusterInfo struct {
 // Add these new handler functions
 func (s *ClusterServer) listClusters() ([]ClusterInfo, error) {
 	absPath, err := filepath.Abs(CLUSTER_SAVE_DIR)
+	if err != nil {
+		return nil, err
+	}
 	fmt.Printf("\n=== Listing clusters ===\n")
 	fmt.Printf("Looking for clusters in absolute path: %s\n", absPath)
 
@@ -488,35 +417,6 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "Cluster loaded successfully"})
 	})
 
-	// Get statistics about the current clustering
-	// 	r.GET("/api/stats", func(c *gin.Context) {
-	// 		stats := map[string]interface{}{
-	// 			"total_points": len(server.cluster.Points),
-	// 			"options":      server.cluster.Options,
-	// 			"zoom_levels":  map[int]int{},
-	// 		}
-
-	// 		// Count points at each zoom level
-	// 		for zoom, tree := range server.cluster.Tree {
-	// 			if tree != nil {
-	// 				stats["zoom_levels"].(map[int]int)[zoom] = len(tree.Points)
-	// 			}
-	// 		}
-
-	// 		// Get current memory stats
-	// 		var memStats runtime.MemStats
-	// 		runtime.ReadMemStats(&memStats)
-
-	// 		stats["memory"] = map[string]interface{}{
-	// 			"Alloc":      memStats.Alloc,
-	// 			"TotalAlloc": memStats.TotalAlloc,
-	// 			"Sys":        memStats.Sys,
-	// 			"NumGC":      memStats.NumGC,
-	// 		}
-
-	// 		c.JSON(http.StatusOK, stats)
-	// 	})
-
 	// Create a channel to listen for interrupt signals
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
@@ -551,13 +451,6 @@ func main() {
 
 	fmt.Println("Server stopped")
 }
-
-// func min(a, b int) int {
-// 	if a < b {
-// 		return a
-// 	}
-// 	return b
-// }
 
 // generateTestPoints creates n random points within specified bounds
 func generateTestPoints(n int, bounds cluster.KDBounds) []cluster.Point {
@@ -654,78 +547,5 @@ func TestSupercluster(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// Benchmark clustering performance
-func BenchmarkSupercluster(b *testing.B) {
-	bounds := cluster.KDBounds{
-		MinX: -180,
-		MinY: -85,
-		MaxX: 180,
-		MaxY: 85,
-	}
-
-	points := generateTestPoints(10000, bounds)
-	options := cluster.SuperclusterOptions{
-		MinZoom:   0,
-		MaxZoom:   16,
-		MinPoints: 3,
-		Radius:    40,
-		Extent:    512,
-		NodeSize:  64,
-	}
-
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		cluster := cluster.NewSupercluster(options)
-		cluster.Load(points)
-
-		// Test querying at different zoom levels
-		// testBounds := cluster.KDBounds{
-		// 	MinX: -122.5,
-		// 	MinY: 37.7,
-		// 	MaxX: -122.3,
-		// 	MaxY: 37.9,
-		// }
-
-		// for zoom := 0; zoom <= 16; zoom += 4 {
-		// 	cluster.GetClusters(testBounds, zoom)
-		// }
-	}
-}
-
-// Example usage function
-func ExampleSupercluster() {
-	// Generate test points
-	bounds := cluster.KDBounds{
-		MinX: -122.5,
-		MinY: 37.7,
-		MaxX: -122.3,
-		MaxY: 37.9,
-	}
-
-	points := generateTestPoints(1000, bounds)
-
-	// Initialize and use cluster
-	options := cluster.SuperclusterOptions{
-		MinZoom:   0,
-		MaxZoom:   16,
-		MinPoints: 3,
-		Radius:    40,
-		Extent:    512,
-		NodeSize:  64,
-	}
-
-	cluster := cluster.NewSupercluster(options)
-	cluster.Load(points)
-
-	// Get clusters at zoom level 10
-	clusters := cluster.GetClusters(bounds, 10)
-
-	for _, c := range clusters {
-		// Process clusters
-		_ = c
 	}
 }
