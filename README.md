@@ -1,7 +1,5 @@
 # Clustopher
 
-# Clustopher
-
 [![Go Tests](https://github.com/thomas-cabral/clustopher/actions/workflows/go-test.yml/badge.svg)](https://github.com/thomas-cabral/clustopher/actions/workflows/go-test.yml)
 
 Clustopher is a high-performance spatial clustering system designed to handle large-scale point datasets (30M+ points) with associated metrics and metadata. It implements a KD-tree based clustering approach similar to Mapbox's Supercluster, but with additional features for metric aggregation and metadata preservation.
