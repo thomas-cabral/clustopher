@@ -7,6 +7,13 @@
     const API_BASE_URL = 'http://localhost:8000';
     
     let mapReloadTrigger = 0;
+    let currentBounds = $state({
+        north: 90,
+        south: -90,
+        east: 180,
+        west: -180,
+        zoom: 0
+    });
     
     async function loadCluster(event: CustomEvent<string>) {
         try {
@@ -33,12 +40,17 @@
     function handleClusterLoaded() {
         mapReloadTrigger += 1;
     }
+
+    function handleBoundsChanged(event: CustomEvent) {
+        currentBounds = event.detail;
+    }
 </script>
 
 <div class="layout">
     <aside class="sidebar">
         <ClusterSelector
             apiBaseUrl={API_BASE_URL}
+            currentBounds={currentBounds}
             on:selectCluster={loadCluster}
             on:clusterCreated={handleClusterCreated}
             on:clusterLoaded={handleClusterLoaded}
@@ -53,6 +65,7 @@
                 width="100%"
                 height="100%"
                 reloadTrigger={mapReloadTrigger}
+                on:boundsChanged={handleBoundsChanged}
             />
         {/if}
     </main>

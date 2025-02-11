@@ -3,6 +3,7 @@
     import { onMount, onDestroy } from 'svelte';
     import mapboxgl, { type LngLatLike } from 'mapbox-gl';
     import 'mapbox-gl/dist/mapbox-gl.css';
+    import { createEventDispatcher } from 'svelte';
   
     const {
         mapboxToken,
@@ -39,6 +40,8 @@
         }>;
         metadataSummary: Record<string, any>;
     } | null = $state(null);
+  
+    const dispatch = createEventDispatcher();
   
     $effect(() => {
         if (reloadTrigger && map) {
@@ -201,11 +204,14 @@
           console.log('Cluster feature:', feature.properties);
 
           let metrics;
+          let metadata;
           try {
             metrics = JSON.parse(feature.properties?.metrics || '{}');
+            metadata = JSON.parse(feature.properties?.metadata || '{}');
           } catch (error) {
-            console.error('Error parsing metrics:', error);
+            console.error('Error parsing feature data:', error);
             metrics = {};
+            metadata = {};
           }
 
           const metricsHtml = Object.entries(metrics)
@@ -216,11 +222,56 @@
             })
             .join('');
 
+          const metadataHtml = Object.entries(metadata)
+            .map(([key, rawValue]) => {
+              try {
+                // Parse the raw JSON value if it's a string
+                const value = typeof rawValue === 'string' ? JSON.parse(rawValue) : rawValue;
+                
+                let contentHtml = '';
+                
+                // Handle different types of metadata values
+                if (typeof value === 'object') {
+                  if (key === 'timeRange') {
+                    contentHtml = `
+                      <div>From: ${new Date(value.start).toLocaleString()}</div>
+                      <div>To: ${new Date(value.end).toLocaleString()}</div>
+                    `;
+                  } else {
+                    // Handle frequency distributions
+                    contentHtml = Object.entries(value)
+                      .map(([subKey, freq]) => 
+                        `<div class="freq-item">
+                          <span>${subKey}</span>
+                          <span>${typeof freq === 'number' ? freq.toFixed(1) : freq}%</span>
+                        </div>`)
+                      .join('');
+                  }
+                } else {
+                  // Handle simple values
+                  contentHtml = `<div class="freq-item">${value}</div>`;
+                }
+
+                return `
+                  <div class="metadata-section">
+                    <h4>${key.charAt(0).toUpperCase() + key.slice(1)}</h4>
+                    <div class="freq-list">
+                      ${contentHtml}
+                    </div>
+                  </div>`;
+              } catch (error) {
+                console.error(`Error parsing metadata for ${key}:`, error);
+                return '';
+              }
+            })
+            .join('');
+
           const popupContent = `
             <div class="popup-content">
               <h3>Cluster Details</h3>
               <p><strong>Points:</strong> ${feature.properties?.point_count}</p>
               ${metricsHtml}
+              ${metadataHtml}
             </div>
           `;
 
@@ -299,7 +350,15 @@
   
       // Update clusters when map moves
       map.on('moveend', () => {
-        fetchClusters(map.getBounds() as mapboxgl.LngLatBounds, map.getZoom());
+        const bounds = map.getBounds();
+        dispatch('boundsChanged', {
+            north: bounds?.getNorth() || 0,
+            south: bounds?.getSouth() || 0,
+            east: bounds?.getEast() || 0,
+            west: bounds?.getWest() || 0,
+            zoom: map.getZoom()
+        });
+        fetchClusters(bounds as mapboxgl.LngLatBounds, map.getZoom());
       });
     });
   
@@ -353,25 +412,42 @@
                 <div class="metadata-summary">
                     {#each Object.entries(metadata.metadataSummary) as [key, value]}
                         <div class="metadata-item">
-                            {#if key === 'timeRange'}
+                            {#if key === 'timestamp'}
                                 <div class="time-range">
                                     <h5>Time Range</h5>
-                                    <div>From: {new Date(value.start).toLocaleString()}</div>
-                                    <div>To: {new Date(value.end).toLocaleString()}</div>
+                                    <div>From: {new Date(value.earliest).toLocaleString()}</div>
+                                    <div>To: {new Date(value.latest).toLocaleString()}</div>
                                 </div>
-                            {:else if key === 'category'}
-                                <div class="category-distribution">
-                                    <h5>Categories</h5>
-                                    {#each Object.entries(value) as [cat, percent]}
-                                        <div class="category-item">
-                                            <span>{cat}:</span>
-                                            <span>{percent.toFixed(1)}%</span>
-                                        </div>
-                                    {/each}
+                            {:else if typeof value === 'object' && ('min' in value || 'max' in value)}
+                                <div class="range-section">
+                                    <h5>{key.charAt(0).toUpperCase() + key.slice(1)}</h5>
+                                    <div class="range-stats">
+                                        <div>Min: {value.min.toFixed(1)}</div>
+                                        <div>Max: {value.max.toFixed(1)}</div>
+                                        {#if 'average' in value}
+                                            <div>Avg: {value.average.toFixed(1)}</div>
+                                        {/if}
+                                    </div>
+                                </div>
+                            {:else if typeof value === 'object'}
+                                <div class="distribution-section">
+                                    <h5>{key.charAt(0).toUpperCase() + key.slice(1)}</h5>
+                                    <div class="distribution-list">
+                                        {#each Object.entries(value) as [subKey, percentage]}
+                                            <div class="distribution-item">
+                                                <span>{subKey}</span>
+                                                <span>{typeof percentage === 'number' ? 
+                                                    `${percentage.toFixed(1)}%` : 
+                                                    percentage}</span>
+                                            </div>
+                                        {/each}
+                                    </div>
                                 </div>
                             {:else}
-                                <label>{key}:</label>
-                                <span>{value}</span>
+                                <div class="single-value">
+                                    <h5>{key.charAt(0).toUpperCase() + key.slice(1)}</h5>
+                                    <span>{value}</span>
+                                </div>
                             {/if}
                         </div>
                     {/each}
@@ -523,21 +599,33 @@
         color: #666;
     }
 
-    .category-distribution {
+    .distribution-section {
         width: 100%;
         margin: 5px 0;
     }
 
-    .category-distribution h5 {
+    .distribution-section h5 {
         margin: 0 0 5px 0;
         color: #666;
+        font-size: 13px;
     }
 
-    .category-item {
+    .distribution-list {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .distribution-item {
         display: flex;
         justify-content: space-between;
         font-size: 12px;
         padding: 2px 0;
+    }
+
+    .single-value {
+        font-size: 12px;
+        color: #333;
     }
 
     /* Add scrollbar styling for the metadata panel */
@@ -557,5 +645,44 @@
 
     .metadata-panel::-webkit-scrollbar-thumb:hover {
         background: rgba(0, 0, 0, 0.3);
+    }
+
+    :global(.freq-list) {
+        margin-top: 4px;
+        font-size: 12px;
+    }
+
+    :global(.freq-item) {
+        display: flex;
+        justify-content: space-between;
+        padding: 2px 0;
+    }
+
+    :global(.metadata-section) {
+        margin-top: 8px;
+    }
+
+    :global(.metadata-section h4) {
+        margin: 0;
+        font-size: 13px;
+        color: #666;
+    }
+
+    .range-section {
+        width: 100%;
+        margin: 5px 0;
+    }
+
+    .range-section h5 {
+        margin: 0 0 5px 0;
+        color: #666;
+        font-size: 13px;
+    }
+
+    .range-stats {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 5px;
+        font-size: 12px;
     }
   </style>

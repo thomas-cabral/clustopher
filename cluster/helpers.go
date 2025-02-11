@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"time"
 )
 
@@ -20,6 +21,17 @@ type MetricStats struct {
 	Max     float32 `json:"max"`
 	Sum     float32 `json:"sum"`
 	Average float32 `json:"average"`
+}
+
+type MetadataRange struct {
+	Min     float64 `json:"min"`
+	Max     float64 `json:"max"`
+	Average float64 `json:"average"`
+}
+
+type TimestampRange struct {
+	Earliest time.Time `json:"earliest"`
+	Latest   time.Time `json:"latest"`
 }
 
 func CalculateMetadataSummary(clusters []ClusterNode) MetadataSummary {
@@ -40,18 +52,17 @@ func CalculateMetadataSummary(clusters []ClusterNode) MetadataSummary {
 		count int
 	})
 
-	// Track metadata frequencies with type-specific handling
-	metadataFreq := make(map[string]map[string]int)
-	timestampStats := struct {
-		min   time.Time
-		max   time.Time
+	// Track metadata values and their frequencies
+	metadataValues := make(map[string]map[string]int)
+	numericMetadata := make(map[string]struct {
+		min   float64
+		max   float64
+		sum   float64
 		count int
-	}{
-		min: time.Now(),
-		max: time.Time{},
-	}
+	})
+	timestampRanges := make(map[string]TimestampRange)
 
-	// Process each cluster
+	// Process each cluster or point
 	for _, c := range clusters {
 		if c.Count > 1 {
 			summary.NumClusters++
@@ -79,35 +90,56 @@ func CalculateMetadataSummary(clusters []ClusterNode) MetadataSummary {
 			metricsMap[metricName] = stats
 		}
 
-		// Process metadata with type-specific handling
+		// Process metadata
 		for key, rawValue := range c.Metadata {
-			if _, exists := metadataFreq[key]; !exists {
-				metadataFreq[key] = make(map[string]int)
+			if _, exists := metadataValues[key]; !exists {
+				metadataValues[key] = make(map[string]int)
 			}
 
-			// Try to unmarshal the value based on expected types
-			switch key {
-			case "timestamp":
-				var timestamp time.Time
-				if err := json.Unmarshal(rawValue, &timestamp); err == nil {
-					if timestamp.Before(timestampStats.min) {
-						timestampStats.min = timestamp
+			var frequencies map[string]float64
+			if err := json.Unmarshal(rawValue, &frequencies); err == nil {
+				for value, freq := range frequencies {
+					count := int(freq * float64(c.Count))
+
+					if key == "timestamp" {
+						if ts, err := time.Parse(time.RFC3339, value); err == nil {
+							timeRange, exists := timestampRanges[key]
+							if !exists {
+								timeRange = TimestampRange{
+									Earliest: ts,
+									Latest:   ts,
+								}
+							} else {
+								if ts.Before(timeRange.Earliest) {
+									timeRange.Earliest = ts
+								}
+								if ts.After(timeRange.Latest) {
+									timeRange.Latest = ts
+								}
+							}
+							timestampRanges[key] = timeRange
+						}
+					} else if numValue, err := strconv.ParseFloat(value, 64); err == nil {
+						// Track numeric metadata
+						stats, exists := numericMetadata[key]
+						if !exists {
+							stats.min = numValue
+							stats.max = numValue
+						} else {
+							if numValue < stats.min {
+								stats.min = numValue
+							}
+							if numValue > stats.max {
+								stats.max = numValue
+							}
+						}
+						stats.sum += numValue * float64(count)
+						stats.count += count
+						numericMetadata[key] = stats
+					} else {
+						// Track categorical metadata
+						metadataValues[key][value] += count
 					}
-					if timestamp.After(timestampStats.max) {
-						timestampStats.max = timestamp
-					}
-					timestampStats.count++
-				}
-			case "category":
-				var category string
-				if err := json.Unmarshal(rawValue, &category); err == nil {
-					metadataFreq[key][category]++
-				}
-			default:
-				// For other metadata types, store as string
-				var strValue string
-				if err := json.Unmarshal(rawValue, &strValue); err == nil {
-					metadataFreq[key][strValue]++
 				}
 			}
 		}
@@ -123,38 +155,33 @@ func CalculateMetadataSummary(clusters []ClusterNode) MetadataSummary {
 		}
 	}
 
-	// Add timestamp range to metadata summary
-	if timestampStats.count > 0 {
-		summary.MetadataSummary["timeRange"] = map[string]string{
-			"start": timestampStats.min.Format(time.RFC3339),
-			"end":   timestampStats.max.Format(time.RFC3339),
+	// Add metadata summaries
+	for key, timeRange := range timestampRanges {
+		summary.MetadataSummary[key] = timeRange
+	}
+
+	for key, stats := range numericMetadata {
+		summary.MetadataSummary[key] = MetadataRange{
+			Min:     stats.min,
+			Max:     stats.max,
+			Average: stats.sum / float64(stats.count),
 		}
 	}
 
-	// Find most common categories and other metadata values
-	for key, freqMap := range metadataFreq {
-		if key == "category" {
-			// For categories, include distribution
-			distribution := make(map[string]float64)
-			total := 0
-			for _, count := range freqMap {
-				total += count
-			}
-			for value, count := range freqMap {
-				distribution[value] = float64(count) / float64(total) * 100
-			}
-			summary.MetadataSummary[key] = distribution
-		} else {
-			// For other metadata, just include most common value
-			var mostCommon string
-			var maxCount int
-			for value, count := range freqMap {
-				if count > maxCount {
-					maxCount = count
-					mostCommon = value
+	for key, freqMap := range metadataValues {
+		if _, isNumeric := numericMetadata[key]; !isNumeric {
+			if _, isTime := timestampRanges[key]; !isTime {
+				// Only process distributions for non-numeric, non-timestamp metadata
+				distribution := make(map[string]float64)
+				total := 0
+				for _, count := range freqMap {
+					total += count
 				}
+				for value, count := range freqMap {
+					distribution[value] = float64(count) / float64(total) * 100
+				}
+				summary.MetadataSummary[key] = distribution
 			}
-			summary.MetadataSummary[key] = mostCommon
 		}
 	}
 
@@ -165,6 +192,10 @@ func GenerateTestPoints(n int, bounds KDBounds) []Point {
 	rand.Seed(time.Now().UnixNano())
 	points := make([]Point, n)
 	randomMetricName := fmt.Sprintf("metric_%d", rand.Intn(1000))
+
+	// Define more diverse categories for global data
+	categories := []string{"Urban", "Rural", "Coastal", "Mountain", "Desert", "Forest", "Island"}
+	regions := []string{"Americas", "Europe", "Asia", "Africa", "Oceania"}
 
 	for i := 0; i < n; i++ {
 		x := bounds.MinX + rand.Float32()*(bounds.MaxX-bounds.MinX)
@@ -182,8 +213,10 @@ func GenerateTestPoints(n int, bounds KDBounds) []Point {
 				randomMetricName: rand.Float32() * 200,
 			},
 			Metadata: map[string]interface{}{
-				"timestamp": time.Now().Add(-time.Duration(rand.Intn(7*24)) * time.Hour),
-				"category":  []string{"A", "B", "C"}[rand.Intn(3)],
+				"timestamp": time.Now().Add(-time.Duration(rand.Intn(365)) * time.Hour * 24), // Expanded to full year
+				"category":  categories[rand.Intn(len(categories))],
+				"region":    regions[rand.Intn(len(regions))],
+				"elevation": rand.Float32() * 5000, // Added elevation in meters
 			},
 		}
 	}

@@ -111,26 +111,53 @@ func (sc *Supercluster) ToGeoJSON(bounds KDBounds, zoom int) (*FeatureCollection
 
 	// Convert clusters to GeoJSON features
 	features := make([]Feature, len(clusters))
-	for i, cluster := range clusters {
+	for i, c := range clusters {
 		// Create properties map
 		properties := make(map[string]interface{})
-		properties["cluster"] = cluster.Count > 1
-		properties["cluster_id"] = cluster.ID
-		properties["point_count"] = cluster.Count
+		properties["cluster"] = c.Count > 1
 
-		// Add metadata if it exists
-		if cluster.Metadata != nil {
-			for k, v := range cluster.Metadata {
+		if c.Count > 1 {
+			// Cluster properties
+			properties["cluster_id"] = c.ID
+			properties["point_count"] = c.Count
+		} else {
+			// Individual point properties
+			properties["id"] = c.ID
+
+			// Add metadata if it exists
+			if c.Metadata != nil {
+				for k, v := range c.Metadata {
+					// Unmarshal the JSON raw message
+					var freqMap map[string]float64
+					if err := json.Unmarshal(v, &freqMap); err == nil {
+						// If there's exactly one value with 100% frequency, use that value
+						if len(freqMap) == 1 {
+							for value, freq := range freqMap {
+								if math.Abs(freq-1.0) < 0.0001 {
+									properties[k] = value
+									continue
+								}
+							}
+						}
+						// Otherwise use the frequency map
+						properties[k] = freqMap
+					}
+				}
+			}
+		}
+
+		// Add metrics if they exist
+		if c.Metrics.Values != nil {
+			for k, v := range c.Metrics.Values {
 				properties[k] = v
 			}
 		}
 
-		// Create feature
 		features[i] = Feature{
 			Type: "Feature",
 			Geometry: Geometry{
 				Type:        "Point",
-				Coordinates: []float64{float64(cluster.X), float64(cluster.Y)},
+				Coordinates: []float64{float64(c.X), float64(c.Y)},
 			},
 			Properties: properties,
 		}
@@ -537,6 +564,9 @@ func (sc *Supercluster) Load(points []Point) {
 
 // GetClusters returns clusters for the given bounds and zoom level
 func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
+	if sc == nil {
+		return nil
+	}
 	fmt.Printf("Getting clusters for zoom level %d\n", zoom)
 	fmt.Printf("Bounds: MinX: %f, MinY: %f, MaxX: %f, MaxY: %f\n",
 		bounds.MinX, bounds.MinY, bounds.MaxX, bounds.MaxY)
@@ -549,21 +579,22 @@ func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
 	fmt.Printf("Projected bounds: Min(%f,%f) Max(%f,%f)\n",
 		minP[0], minP[1], maxP[0], maxP[1])
 
-	// Get all points in the bounds
-	var points []KDPoint
-	for _, p := range sc.Tree.Points {
-		proj := sc.projectFast(p.X, p.Y, zoom)
-
-		// Check if point is within bounds
-		if proj[0] >= minP[0] && proj[0] <= maxP[0] &&
-			proj[1] >= minP[1] && proj[1] <= maxP[1] {
-			points = append(points, p)
-		}
-	}
-
-	// Calculate clustering radius
+	// Calculate clustering radius in tile coordinates
 	zoomFactor := math.Pow(2, float64(sc.Options.MaxZoom-zoom))
 	radius := float32(sc.Options.Radius * zoomFactor / float64(sc.Options.Extent))
+
+	// Get all points in the bounds
+	var points []KDPoint
+	for i, p := range sc.Tree.Points {
+		proj := sc.projectFast(p.X, p.Y, zoom)
+		if proj[0] >= minP[0] && proj[0] <= maxP[0] &&
+			proj[1] >= minP[1] && proj[1] <= maxP[1] {
+			point := p
+			point.ID = sc.Points[i].ID
+			point.Metadata = sc.Points[i].Metadata
+			points = append(points, point)
+		}
+	}
 
 	// Project and cluster points
 	projectedPoints := sc.projectPoints(points, zoom, sc.Tree.Pool)
@@ -579,41 +610,33 @@ func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
 	return clusters
 }
 
-func (sc *Supercluster) projectPoints(points []KDPoint, zoom int, metricsPool *MetricsPool) []KDPoint {
-	projectedPoints := make([]KDPoint, 0, len(points))
-
-	for _, p := range points {
-		proj := sc.projectFast(p.X, p.Y, zoom)
-
-		// Create projected point keeping the same MetricIdx
-		projectedPoints = append(projectedPoints, KDPoint{
-			X:         proj[0],
-			Y:         proj[1],
-			ID:        p.ID,
-			NumPoints: p.NumPoints,
-			MetricIdx: p.MetricIdx, // Keep the same metrics index
-			Metadata:  p.Metadata,  // Keep metadata if needed for clustering
-		})
-	}
-
-	return projectedPoints
-}
-
 func (sc *Supercluster) clusterPoints(points []KDPoint, radius float32) []ClusterNode {
 	fmt.Printf("Clustering %d points with radius %f\n", len(points), radius)
 
 	var clusters []ClusterNode
 	processed := make(map[uint32]bool)
 
-	for _, p := range points {
+	// Sort points by X coordinate to help with clustering
+	sort.Slice(points, func(i, j int) bool {
+		return points[i].X < points[j].X
+	})
+
+	for i, p := range points {
 		if processed[p.ID] {
 			continue
 		}
 
 		// Find nearby points
 		var nearby []KDPoint
-		for _, other := range points {
-			if other.ID == p.ID {
+		nearby = append(nearby, p) // Include current point
+
+		// Only look at points that could be within radius based on X coordinate
+		for j := i + 1; j < len(points); j++ {
+			other := points[j]
+			if other.X-p.X > radius {
+				break // Points are sorted by X, so we can stop looking
+			}
+			if processed[other.ID] {
 				continue
 			}
 
@@ -626,23 +649,22 @@ func (sc *Supercluster) clusterPoints(points []KDPoint, radius float32) []Cluste
 
 		// If we have enough points, create a cluster
 		if len(nearby) >= sc.Options.MinPoints {
-			cluster := createCluster(append(nearby, p), sc.Tree.Pool)
+			cluster := createCluster(nearby, sc.Tree.Pool)
 			clusters = append(clusters, cluster)
 
 			// Mark points as processed
 			for _, np := range nearby {
 				processed[np.ID] = true
 			}
-			processed[p.ID] = true
-		} else {
+		} else if !processed[p.ID] {
 			// Add as individual point
-			pointMetrics := sc.Tree.Pool.Get(p.MetricIdx)
 			clusters = append(clusters, ClusterNode{
-				ID:      p.ID,
-				X:       p.X,
-				Y:       p.Y,
-				Count:   1,
-				Metrics: ClusterMetrics{Values: pointMetrics},
+				ID:       p.ID,
+				X:        p.X,
+				Y:        p.Y,
+				Count:    1,
+				Metrics:  ClusterMetrics{Values: sc.Tree.Pool.Get(p.MetricIdx)},
+				Metadata: convertMetadataToJSON(p.Metadata),
 			})
 			processed[p.ID] = true
 		}
@@ -652,50 +674,71 @@ func (sc *Supercluster) clusterPoints(points []KDPoint, radius float32) []Cluste
 	return clusters
 }
 
+// Helper function to convert metadata to JSON.RawMessage with frequencies
+func convertMetadataToJSON(metadata map[string]interface{}) map[string]json.RawMessage {
+	if metadata == nil {
+		return nil
+	}
+
+	result := make(map[string]json.RawMessage)
+	for k, v := range metadata {
+		// For single points, create a frequency map with 100% for the value
+		frequencies := map[string]float64{
+			fmt.Sprintf("%v", v): 1.0, // 100% frequency for the single value
+		}
+
+		if jsonBytes, err := json.Marshal(frequencies); err == nil {
+			result[k] = jsonBytes
+		}
+	}
+	return result
+}
+
 func createCluster(points []KDPoint, metricsPool *MetricsPool) ClusterNode {
 	var sumX, sumY float64
 	metrics := make(map[string]float64)
 	var totalPoints uint32
 
 	// Create a map to aggregate metadata
-	metadata := make(map[string]interface{})
-	metadataCounts := make(map[string]int)
+	metadataValues := make(map[string]map[interface{}]int)
+	uniquePoints := make(map[uint32]bool)
 
-	// Accumulate values
+	// First pass: count frequencies of each metadata value
 	for _, p := range points {
-		weight := float64(p.NumPoints)
-		sumX += float64(p.X) * weight
-		sumY += float64(p.Y) * weight
-		totalPoints += p.NumPoints
+		if !uniquePoints[p.ID] {
+			uniquePoints[p.ID] = true
+			totalPoints += p.NumPoints
 
-		// Get metrics from pool and accumulate
-		if pointMetrics := metricsPool.Get(p.MetricIdx); pointMetrics != nil {
-			for k, v := range pointMetrics {
-				// Don't multiply by weight since the metrics are already weighted
-				// when stored in the pool for clusters
-				if p.NumPoints == 1 {
-					// Only multiply by weight for individual points
-					metrics[k] += float64(v) * weight
-				} else {
-					// For clusters, the metrics are already weighted
-					metrics[k] += float64(v)
+			weight := float64(p.NumPoints)
+			sumX += float64(p.X) * weight
+			sumY += float64(p.Y) * weight
+
+			// Get metrics from pool and accumulate
+			if pointMetrics := metricsPool.Get(p.MetricIdx); pointMetrics != nil {
+				for k, v := range pointMetrics {
+					if p.NumPoints > 1 {
+						// For clusters, v is already the total sum
+						metrics[k] += float64(v)
+					} else {
+						// For individual points, add the raw value
+						metrics[k] += float64(v)
+					}
 				}
 			}
-		}
 
-		// Aggregate metadata
-		for k, v := range p.Metadata {
-			key := fmt.Sprintf("%s:%v", k, v)
-			metadataCounts[key]++
-
-			// Store the actual key-value pair
-			if metadataCounts[key] == 1 {
-				metadata[k] = v
+			// Count frequencies of metadata values
+			if p.Metadata != nil {
+				for k, v := range p.Metadata {
+					if _, exists := metadataValues[k]; !exists {
+						metadataValues[k] = make(map[interface{}]int)
+					}
+					metadataValues[k][v] += int(p.NumPoints)
+				}
 			}
 		}
 	}
 
-	// Calculate position averages only (not metrics)
+	// Calculate position averages
 	invTotal := 1.0 / float64(totalPoints)
 	cluster := ClusterNode{
 		ID:    uuid.New().ID(),
@@ -708,20 +751,23 @@ func createCluster(points []KDPoint, metricsPool *MetricsPool) ClusterNode {
 		Metadata: make(map[string]json.RawMessage),
 	}
 
-	// Store summed metrics (not averaged)
+	// Store summed metrics
 	for k, sum := range metrics {
 		cluster.Metrics.Values[k] = float32(sum)
 	}
 
-	// Add metadata to cluster
-	// Only keep metadata values that appear in all points
-	for k, v := range metadata {
-		if metadataCounts[fmt.Sprintf("%s:%v", k, v)] == len(points) {
-			// Convert to json.RawMessage
-			jsonBytes, err := json.Marshal(v)
-			if err == nil {
-				cluster.Metadata[k] = jsonBytes
-			}
+	// Calculate and store frequencies for all metadata values
+	for key, valueCounts := range metadataValues {
+		frequencies := make(map[string]float64)
+		total := 0
+		for _, count := range valueCounts {
+			total += count
+		}
+		for value, count := range valueCounts {
+			frequencies[fmt.Sprintf("%v", value)] = float64(count) / float64(total)
+		}
+		if jsonBytes, err := json.Marshal(frequencies); err == nil {
+			cluster.Metadata[key] = jsonBytes
 		}
 	}
 
@@ -771,4 +817,25 @@ func (sc *Supercluster) unprojectFast(x, y float32, zoom int) [2]float32 {
 	lat := float32(math.Atan(math.Sinh(float64(math.Pi*(1-2*y))))) * 180 / math.Pi
 
 	return [2]float32{lng, lat}
+}
+
+// projectPoints converts points from lng/lat to tile coordinates
+func (sc *Supercluster) projectPoints(points []KDPoint, zoom int, metricsPool *MetricsPool) []KDPoint {
+	projectedPoints := make([]KDPoint, len(points))
+
+	for i, p := range points {
+		proj := sc.projectFast(p.X, p.Y, zoom)
+
+		// Create projected point keeping all other properties
+		projectedPoints[i] = KDPoint{
+			X:         proj[0],
+			Y:         proj[1],
+			ID:        p.ID,
+			NumPoints: p.NumPoints,
+			MetricIdx: p.MetricIdx,
+			Metadata:  p.Metadata,
+		}
+	}
+
+	return projectedPoints
 }

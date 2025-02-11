@@ -1,7 +1,16 @@
 <script lang="ts">
     import { createEventDispatcher, onMount } from 'svelte';
     
-    const { apiBaseUrl } = $props<{ apiBaseUrl: string }>();
+    const { apiBaseUrl, currentBounds } = $props<{ 
+        apiBaseUrl: string;
+        currentBounds?: {
+            north: number;
+            south: number;
+            east: number;
+            west: number;
+            zoom: number;
+        };
+    }>();
     
     let clusters: Array<{
         id: string;
@@ -95,8 +104,8 @@
             const responseData: { message: string, clusterInfo: ClusterInfo } = await response.json();
             loadedClusterInfo = responseData.clusterInfo;
             
-            // Fetch initial metrics for the whole dataset
-            const bounds = {
+            // Use current bounds if available, otherwise use world bounds
+            const bounds = currentBounds || {
                 north: 90,
                 south: -90,
                 east: 180,
@@ -105,7 +114,7 @@
             };
             
             const metricsResponse = await fetch(
-                `${apiBaseUrl}/api/clusters?zoom=0&north=90&south=-90&east=180&west=-180`
+                `${apiBaseUrl}/api/clusters?zoom=${bounds.zoom}&north=${bounds.north}&south=${bounds.south}&east=${bounds.east}&west=${bounds.west}`
             );
             
             if (metricsResponse.ok) {

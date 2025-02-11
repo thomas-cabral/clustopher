@@ -1,2 +1,6 @@
 /data
 /tmp
+
+/.cursor
+
+coverage.out

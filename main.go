@@ -70,13 +70,13 @@ func NewClusterServer(numPoints int) *ClusterServer {
 	if numPoints > 0 {
 		fmt.Printf("Generating new cluster with %d points...\n", numPoints)
 		bounds := cluster.KDBounds{
-			MinX: -125.0,
-			MinY: 25.0,
-			MaxX: -67.0,
-			MaxY: 49.0,
+			MinX: -180.0,
+			MinY: -90.0,
+			MaxX: 180.0,
+			MaxY: 90.0,
 		}
 
-		fmt.Printf("Generating points in the Continental US...\n")
+		fmt.Printf("Generating points across the whole world...\n")
 		points := cluster.GenerateTestPoints(numPoints, bounds)
 
 		options := cluster.SuperclusterOptions{
@@ -333,6 +333,12 @@ func main() {
 		fmt.Printf("Getting clusters for zoom %d with bounds: %+v\n", zoom, bounds)
 
 		clusters := server.cluster.GetClusters(bounds, zoom)
+
+		if len(clusters) == 0 || clusters == nil {
+			fmt.Printf("No clusters found for zoom %d and bounds %+v\n", zoom, bounds)
+			c.JSON(http.StatusOK, gin.H{"features": []map[string]interface{}{}})
+			return
+		}
 
 		// Convert to GeoJSON
 		features := make([]map[string]interface{}, len(clusters))
