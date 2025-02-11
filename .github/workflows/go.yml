@@ -32,19 +32,5 @@ jobs:
     - name: Run vet
       run: go vet ./...
 
-    - name: Run tests with coverage
-      run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
-
-    # - name: Upload coverage to Codecov
-    #   uses: codecov/codecov-action@v4
-    #   with:
-    #     file: ./coverage.txt
-    #     fail_ci_if_error: false
-
-    # - name: Check test coverage
-    #   run: |
-    #     total_coverage=$(go tool cover -func=coverage.txt | grep total | awk '{print $3}' | sed 's/%//')
-    #     if (( $(echo "$total_coverage < 80" | bc -l) )); then
-    #       echo "Test coverage is below 80%"
-    #       exit 1
-    #     fi
+    - name: Run tests
+      run: go test -v -race ./...
