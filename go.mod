@@ -3,6 +3,7 @@ module web/clustopher
 go 1.23.4
 
 require (
+	github.com/edsrzf/mmap-go v1.2.0
 	github.com/gin-gonic/gin v1.10.0
 	github.com/klauspost/compress v1.17.11
 )

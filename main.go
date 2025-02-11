@@ -101,7 +101,7 @@ func NewClusterServer(numPoints int) *ClusterServer {
 		savePath := generateClusterFilename(numPoints)
 		fmt.Printf("Saving new cluster to %s...\n", savePath)
 		saveStart := time.Now() // Start timer for Save
-		if err := supercluster.SaveCompressed(savePath); err != nil {
+		if err := supercluster.SaveCompressedMMap(savePath); err != nil {
 			fmt.Printf("ERROR: Failed to save cluster: %v\n", err)
 		} else {
 			saveDuration := time.Since(saveStart) // End timer for Save
@@ -242,7 +242,7 @@ func (s *ClusterServer) loadClusterById(id string) (*ClusterInfo, error) {
 	}
 
 	loadStart := time.Now() // Start timer for LoadCompressedSupercluster
-	loadedCluster, err := cluster.LoadCompressedSupercluster(clusterFile)
+	loadedCluster, err := cluster.LoadCompressedMMap(clusterFile)
 	loadDuration := time.Since(loadStart) // End timer for LoadCompressedSupercluster
 	fmt.Printf("Cluster loaded from file in %v\n", loadDuration)
 
@@ -514,7 +514,7 @@ func main() {
 	savePath := generateClusterFilename(len(server.cluster.Points))
 	fmt.Printf("Saving cluster to %s...\n", savePath)
 	saveStart := time.Now()
-	if err := server.cluster.SaveCompressed(savePath); err != nil {
+	if err := server.cluster.SaveCompressedMMap(savePath); err != nil {
 		fmt.Printf("Failed to save cluster on shutdown: %v\n", err)
 	} else {
 		saveDuration := time.Since(saveStart)
