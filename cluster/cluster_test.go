@@ -531,7 +531,7 @@ func TestProjectPoints(t *testing.T) {
 	// Test projection at different zoom levels
 	zooms := []int{0, 8, 16}
 	for _, zoom := range zooms {
-		projected := sc.projectPoints(points, zoom, pool)
+		projected := sc.projectPoints(points, zoom)
 
 		if len(projected) != len(points) {
 			t.Errorf("Expected %d projected points at zoom %d, got %d",

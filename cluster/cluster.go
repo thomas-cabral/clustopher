@@ -47,6 +47,15 @@ type Point struct {
 	Metadata map[string]interface{}
 }
 
+
+type ClusterMetrics struct {
+	Values map[string]float32
+}
+
+type KDBounds struct {
+	MinX, MinY, MaxX, MaxY float32
+}
+
 type MetricsPool struct {
 	Metrics []map[string]float32
 	Lookup  map[string]int // For deduplication
@@ -72,9 +81,10 @@ type ClusterNode struct {
 
 // Supercluster implements the clustering algorithm
 type Supercluster struct {
-	Tree    *KDTree // Single KD-tree for all zoom levels
-	Points  []Point // Original input points
-	Options SuperclusterOptions
+    Tree    *KDTree
+    Points  []Point
+    Options SuperclusterOptions
+    Cache   *ClusterCache
 }
 
 type SuperclusterOptions struct {
@@ -102,6 +112,16 @@ type FeatureCollection struct {
 type Geometry struct {
 	Type        string    `json:"type"`
 	Coordinates []float64 `json:"coordinates"`
+}
+
+type ClusterCache struct {
+    lowZoomClusters []ClusterNode  // clusters for zoom <= 5
+    lowZoomIndex    *KDTree        // spatial index for low zoom
+    mu              sync.RWMutex
+}
+
+func NewClusterCache() *ClusterCache {
+    return &ClusterCache{}
 }
 
 // ToGeoJSON converts clusters to GeoJSON format
@@ -539,139 +559,360 @@ func (t *KDTree) insertNode(nodeIdx int32, pointIdx int32, depth int) {
 	}
 }
 
-// Load initializes the cluster index with points
 func (sc *Supercluster) Load(points []Point) {
-	fmt.Printf("Loading %d points\n", len(points))
+    fmt.Printf("Loading %d points\n", len(points))
+    
+    // Store original points first
+    sc.Points = points
 
-	metricsPool := NewMetricsPool()
-	kdPoints := make([]KDPoint, len(points))
+    // Create metrics pool
+    metricsPool := NewMetricsPool()
+    
+    // Convert to KDPoints for the main tree
+    kdPoints := make([]KDPoint, len(points))
+    for i, p := range points {
+        metricIdx := metricsPool.Add(p.Metrics)
+        kdPoints[i] = KDPoint{
+            X:         p.X,
+            Y:         p.Y,
+            ID:        p.ID,
+            NumPoints: 1,
+            MetricIdx: metricIdx,
+            Metadata:  p.Metadata,
+        }
+    }
 
-	for i, p := range points {
-		metricIdx := metricsPool.Add(p.Metrics)
-		kdPoints[i] = KDPoint{
-			X:         p.X,
-			Y:         p.Y,
-			ID:        p.ID,
-			NumPoints: 1,
-			MetricIdx: metricIdx,
-			Metadata:  p.Metadata,
-		}
-	}
-
-	sc.Points = points
-	sc.Tree = NewKDTree(kdPoints, sc.Options.NodeSize, metricsPool)
+    // Initialize main tree
+    sc.Tree = NewKDTree(kdPoints, sc.Options.NodeSize, metricsPool)
+    
+    // Initialize cache
+    sc.Cache = NewClusterCache()
+    
+    // Pre-compute clusters for low zoom levels
+    sc.preComputeClusters()
 }
+
+func (sc *Supercluster) preComputeClusters() {
+    fmt.Printf("Starting to pre-compute clusters\n")
+    
+    const lowZoomLevel = 5
+    
+    // Calculate clustering radius for low zoom
+    zoomFactor := math.Pow(2, float64(sc.Options.MaxZoom-lowZoomLevel))
+    radius := float32(sc.Options.Radius * zoomFactor / float64(sc.Options.Extent))
+    
+    fmt.Printf("Computing clusters for zoom %d with radius %f\n", lowZoomLevel, radius)
+    
+    // Convert original points to KDPoints for clustering
+    originalKDPoints := make([]KDPoint, len(sc.Points))
+    for i, p := range sc.Points {
+        originalKDPoints[i] = KDPoint{
+            X:         p.X,
+            Y:         p.Y,
+            ID:        p.ID,
+            NumPoints: 1, // Important: these are original points
+            MetricIdx: uint32(i),
+            Metadata:  p.Metadata,
+        }
+    }
+    
+    // Project original points for low zoom level
+    projectedPoints := sc.projectPoints(originalKDPoints, lowZoomLevel)
+    
+    // Sort points by X coordinate before clustering
+    sort.Slice(projectedPoints, func(i, j int) bool {
+        return projectedPoints[i].X < projectedPoints[j].X
+    })
+    
+    // Cluster points
+    clusters := sc.clusterPoints(projectedPoints, radius)
+    fmt.Printf("Created %d clusters for low zoom from %d original points\n", 
+        len(clusters), len(originalKDPoints))
+    
+    // Convert clusters to geographic coordinates
+    for i := range clusters {
+        unproj := sc.unprojectFast(clusters[i].X, clusters[i].Y, lowZoomLevel)
+        clusters[i].X = unproj[0]
+        clusters[i].Y = unproj[1]
+    }
+    
+    // Convert clusters to KDPoints for spatial indexing
+    kdPoints := make([]KDPoint, len(clusters))
+    for i, c := range clusters {
+        kdPoints[i] = KDPoint{
+            X:         c.X,
+            Y:         c.Y,
+            ID:        c.ID,
+            NumPoints: c.Count,
+            MetricIdx: uint32(i), // Store index to cluster for metric lookup
+            Metadata:  nil,
+        }
+    }
+    
+    // Create spatial index
+    tree := NewKDTree(kdPoints, sc.Options.NodeSize, sc.Tree.Pool)
+    
+    // Store in cache
+    sc.Cache.mu.Lock()
+    sc.Cache.lowZoomClusters = clusters
+    sc.Cache.lowZoomIndex = tree
+    sc.Cache.mu.Unlock()
+    
+    fmt.Printf("Cached %d low zoom clusters and built spatial index\n", len(clusters))
+}
+
 
 // GetClusters returns clusters for the given bounds and zoom level
 func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
-	if sc == nil {
-		return nil
-	}
-	fmt.Printf("Getting clusters for zoom level %d\n", zoom)
-	fmt.Printf("Bounds: MinX: %f, MinY: %f, MaxX: %f, MaxY: %f\n",
-		bounds.MinX, bounds.MinY, bounds.MaxX, bounds.MaxY)
-	fmt.Printf("Total points in tree: %d\n", len(sc.Tree.Points))
+    if sc == nil || sc.Cache == nil {
+        fmt.Printf("Supercluster or cache is nil\n")
+        return nil
+    }
 
-	// Project bounds to tile space for current zoom level
-	minP := sc.projectFast(bounds.MinX, bounds.MaxY, zoom)
-	maxP := sc.projectFast(bounds.MaxX, bounds.MinY, zoom)
+    bounds = clampBounds(bounds)
+    const lowZoomThreshold = 5
+    
+    if zoom <= lowZoomThreshold {
+        sc.Cache.mu.RLock()
+        defer sc.Cache.mu.RUnlock()
+        
+        if len(sc.Cache.lowZoomClusters) == 0 || sc.Cache.lowZoomIndex == nil {
+            return nil
+        }
+        
+        clusters := sc.Cache.lowZoomClusters
+        index := sc.Cache.lowZoomIndex
 
-	fmt.Printf("Projected bounds: Min(%f,%f) Max(%f,%f)\n",
-		minP[0], minP[1], maxP[0], maxP[1])
+        // Project viewport bounds to tile coordinates
+        minP := sc.projectFast(bounds.MinX, bounds.MinY, zoom)
+        maxP := sc.projectFast(bounds.MaxX, bounds.MaxY, zoom)
 
-	// Calculate clustering radius in tile coordinates
-	zoomFactor := math.Pow(2, float64(sc.Options.MaxZoom-zoom))
-	radius := float32(sc.Options.Radius * zoomFactor / float64(sc.Options.Extent))
+        // Calculate padding based on tile extent and zoom
+        padding := float32(sc.Options.Extent) / float32(math.Pow(2, float64(zoom-lowZoomThreshold)))
+        
+        // Add padding to bounds
+        searchBounds := KDBounds{
+            MinX: minP[0] - padding,
+            MinY: minP[1] - padding,
+            MaxX: maxP[0] + padding,
+            MaxY: maxP[1] + padding,
+        }
 
-	// Get all points in the bounds
-	var points []KDPoint
-	for i, p := range sc.Tree.Points {
-		proj := sc.projectFast(p.X, p.Y, zoom)
-		if proj[0] >= minP[0] && proj[0] <= maxP[0] &&
-			proj[1] >= minP[1] && proj[1] <= maxP[1] {
-			point := p
-			point.ID = sc.Points[i].ID
-			point.Metadata = sc.Points[i].Metadata
-			points = append(points, point)
-		}
-	}
+        var result []ClusterNode
+        for i, cluster := range clusters {
+            // Project cluster position to current zoom level
+            point := index.Points[i]
+            proj := sc.projectFast(point.X, point.Y, zoom)
+            
+            // Check if cluster falls within padded viewport bounds
+            if proj[0] >= searchBounds.MinX && proj[0] <= searchBounds.MaxX &&
+               proj[1] >= searchBounds.MinY && proj[1] <= searchBounds.MaxY {
+                result = append(result, cluster)
+            }
+        }
+        
+        return result
+    }
 
-	// Project and cluster points
-	projectedPoints := sc.projectPoints(points, zoom, sc.Tree.Pool)
-	clusters := sc.clusterPoints(projectedPoints, radius)
+    return sc.getHighZoomClusters(bounds, zoom)
+}
 
-	// Convert back to lng/lat
-	for i := range clusters {
-		unproj := sc.unprojectFast(clusters[i].X, clusters[i].Y, zoom)
-		clusters[i].X = unproj[0]
-		clusters[i].Y = unproj[1]
-	}
+// Helper function to project points for higher zoom levels
+func (sc *Supercluster) getHighZoomClusters(bounds KDBounds, zoom int) []ClusterNode {
+    fmt.Printf("Computing high zoom clusters for zoom %d\n", zoom)
+    
+    // For max zoom, return original points
+    if zoom >= sc.Options.MaxZoom {
+        return sc.getOriginalPoints(bounds, zoom)
+    }
 
-	return clusters
+    // Calculate clustering radius for this zoom
+    zoomFactor := math.Pow(2, float64(sc.Options.MaxZoom-zoom))
+    radius := float32(sc.Options.Radius * zoomFactor / float64(sc.Options.Extent))
+
+    // Get points within bounds with some padding
+    var points []KDPoint
+    minP := sc.projectFast(bounds.MinX, bounds.MaxY, zoom)
+    maxP := sc.projectFast(bounds.MaxX, bounds.MinY, zoom)
+
+    // Add padding to catch points near the edges
+    const padding = 100 // Adjust this value as needed
+    minP[0] -= padding
+    minP[1] -= padding
+    maxP[0] += padding
+    maxP[1] += padding
+
+    for _, p := range sc.Tree.Points {
+        proj := sc.projectFast(p.X, p.Y, zoom)
+        if proj[0] >= minP[0] && proj[0] <= maxP[0] &&
+           proj[1] >= minP[1] && proj[1] <= maxP[1] {
+            points = append(points, p)
+        }
+    }
+
+    fmt.Printf("Found %d points within bounds for clustering\n", len(points))
+
+    // Project and cluster points
+    projectedPoints := sc.projectPoints(points, zoom)
+    clusters := sc.clusterPoints(projectedPoints, radius)
+
+    // Convert back to lng/lat
+    for i := range clusters {
+        unproj := sc.unprojectFast(clusters[i].X, clusters[i].Y, zoom)
+        clusters[i].X = unproj[0]
+        clusters[i].Y = unproj[1]
+    }
+
+    fmt.Printf("Created %d clusters at zoom %d\n", len(clusters), zoom)
+    return clusters
+}
+
+// clampBounds ensures bounds are within valid ranges
+func clampBounds(bounds KDBounds) KDBounds {
+    // Clamp longitude to [-180, 180]
+    bounds.MinX = float32(math.Max(-180, math.Min(180, float64(bounds.MinX))))
+    bounds.MaxX = float32(math.Max(-180, math.Min(180, float64(bounds.MaxX))))
+
+    // Clamp latitude to [-90, 90]
+    bounds.MinY = float32(math.Max(-90, math.Min(90, float64(bounds.MinY))))
+    bounds.MaxY = float32(math.Max(-90, math.Min(90, float64(bounds.MaxY))))
+
+    // Ensure bounds are ordered correctly
+    if bounds.MinX > bounds.MaxX {
+        bounds.MinX, bounds.MaxX = bounds.MaxX, bounds.MinX
+    }
+    if bounds.MinY > bounds.MaxY {
+        bounds.MinY, bounds.MaxY = bounds.MaxY, bounds.MinY
+    }
+
+    return bounds
+}
+
+// Modified projectFast to handle edge cases
+func (sc *Supercluster) projectFast(lng, lat float32, zoom int) [2]float32 {
+    // Clamp input values
+    lng = float32(math.Max(-180, math.Min(180, float64(lng))))
+    lat = float32(math.Max(-85.05112878, math.Min(85.05112878, float64(lat))))
+
+    // Convert to radians
+    latRad := float64(lat) * math.Pi / 180
+
+    // Get x/y coordinates in tile space
+    x := float32((float64(lng) + 180) / 360)
+    y := float32(0.5 - math.Log(math.Tan(latRad*0.5+math.Pi/4))/math.Pi*0.5)
+
+    // Scale to zoom level and tile extent
+    scale := float32(math.Pow(2, float64(zoom)))
+    
+    return [2]float32{
+        x * scale * float32(sc.Options.Extent),
+        y * scale * float32(sc.Options.Extent),
+    }
+}
+
+// Modified unprojectFast to maintain consistency with projectFast
+func (sc *Supercluster) unprojectFast(x, y float32, zoom int) [2]float32 {
+    scale := float32(math.Pow(2, float64(zoom)))
+    
+    // Convert to normalized coordinates (0-1)
+    x = x / (scale * float32(sc.Options.Extent))
+    y = y / (scale * float32(sc.Options.Extent))
+
+    // Convert normalized coordinates to lng/lat
+    lng := float32(x*360 - 180)
+    latRad := math.Atan(math.Sinh(math.Pi * (1 - 2*float64(y))))
+    lat := float32(latRad * 180 / math.Pi)
+
+    return [2]float32{lng, lat}
+}
+
+func (sc *Supercluster) getOriginalPoints(bounds KDBounds, zoom int) []ClusterNode {
+    var result []ClusterNode
+    
+    // Project bounds
+    minP := sc.projectFast(bounds.MinX, bounds.MaxY, zoom)
+    maxP := sc.projectFast(bounds.MaxX, bounds.MinY, zoom)
+    
+    // Find points within bounds
+    for _, p := range sc.Tree.Points {
+        proj := sc.projectFast(p.X, p.Y, zoom)
+        if proj[0] >= minP[0] && proj[0] <= maxP[0] &&
+           proj[1] >= minP[1] && proj[1] <= maxP[1] {
+            // Convert point to cluster node
+            result = append(result, ClusterNode{
+                ID:       p.ID,
+                X:        p.X,
+                Y:        p.Y,
+                Count:    1,
+                Metrics:  ClusterMetrics{Values: sc.Tree.Pool.Get(p.MetricIdx)},
+                Metadata: convertMetadataToJSON(p.Metadata),
+            })
+        }
+    }
+    
+    return result
 }
 
 func (sc *Supercluster) clusterPoints(points []KDPoint, radius float32) []ClusterNode {
-	fmt.Printf("Clustering %d points with radius %f\n", len(points), radius)
+    fmt.Printf("Clustering %d points with radius %f\n", len(points), radius)
 
-	var clusters []ClusterNode
-	processed := make(map[uint32]bool)
+    var clusters []ClusterNode
+    processed := make(map[uint32]bool)
 
-	// Sort points by X coordinate to help with clustering
-	sort.Slice(points, func(i, j int) bool {
-		return points[i].X < points[j].X
-	})
+    for i, p := range points {
+        if processed[p.ID] {
+            continue
+        }
 
-	for i, p := range points {
-		if processed[p.ID] {
-			continue
-		}
+        // Find nearby points
+        var nearby []KDPoint
+        nearby = append(nearby, p)
 
-		// Find nearby points
-		var nearby []KDPoint
-		nearby = append(nearby, p) // Include current point
+        // Look at all points within potential radius
+        for j := i + 1; j < len(points); j++ {
+            other := points[j]
+            if other.X-p.X > radius {
+                break // Points are sorted by X, so we can stop looking
+            }
+            if processed[other.ID] {
+                continue
+            }
 
-		// Only look at points that could be within radius based on X coordinate
-		for j := i + 1; j < len(points); j++ {
-			other := points[j]
-			if other.X-p.X > radius {
-				break // Points are sorted by X, so we can stop looking
-			}
-			if processed[other.ID] {
-				continue
-			}
+            dx := other.X - p.X
+            dy := other.Y - p.Y
+            distSquared := dx*dx + dy*dy
+            
+            if distSquared <= radius*radius {
+                nearby = append(nearby, other)
+            }
+        }
 
-			dx := other.X - p.X
-			dy := other.Y - p.Y
-			if dx*dx+dy*dy <= radius*radius {
-				nearby = append(nearby, other)
-			}
-		}
+        // For low zoom levels, be more aggressive in clustering
+        minPoints := sc.Options.MinPoints
+        if len(nearby) >= minPoints {
+            cluster := createCluster(nearby, sc.Tree.Pool)
+            clusters = append(clusters, cluster)
 
-		// If we have enough points, create a cluster
-		if len(nearby) >= sc.Options.MinPoints {
-			cluster := createCluster(nearby, sc.Tree.Pool)
-			clusters = append(clusters, cluster)
+            // Mark points as processed
+            for _, np := range nearby {
+                processed[np.ID] = true
+            }
+        } else if !processed[p.ID] {
+            // Add as individual point
+            clusters = append(clusters, ClusterNode{
+                ID:       p.ID,
+                X:        p.X,
+                Y:        p.Y,
+                Count:    1,
+                Metrics:  ClusterMetrics{Values: sc.Tree.Pool.Get(p.MetricIdx)},
+                Metadata: convertMetadataToJSON(p.Metadata),
+            })
+            processed[p.ID] = true
+        }
+    }
 
-			// Mark points as processed
-			for _, np := range nearby {
-				processed[np.ID] = true
-			}
-		} else if !processed[p.ID] {
-			// Add as individual point
-			clusters = append(clusters, ClusterNode{
-				ID:       p.ID,
-				X:        p.X,
-				Y:        p.Y,
-				Count:    1,
-				Metrics:  ClusterMetrics{Values: sc.Tree.Pool.Get(p.MetricIdx)},
-				Metadata: convertMetadataToJSON(p.Metadata),
-			})
-			processed[p.ID] = true
-		}
-	}
-
-	fmt.Printf("Created %d clusters from %d points\n", len(clusters), len(points))
-	return clusters
+    fmt.Printf("Created %d clusters from %d points\n", len(clusters), len(points))
+    return clusters
 }
 
 // Helper function to convert metadata to JSON.RawMessage with frequencies
@@ -695,91 +936,78 @@ func convertMetadataToJSON(metadata map[string]interface{}) map[string]json.RawM
 }
 
 func createCluster(points []KDPoint, metricsPool *MetricsPool) ClusterNode {
-	var sumX, sumY float64
-	metrics := make(map[string]float64)
-	var totalPoints uint32
+    var sumX, sumY float64
+    totalPoints := uint32(0)
+    
+    // Maps to accumulate metrics and metadata
+    metricSums := make(map[string]float64)
+    metadataValues := make(map[string]map[interface{}]int)
+    uniquePoints := make(map[uint32]bool)
 
-	// Create a map to aggregate metadata
-	metadataValues := make(map[string]map[interface{}]int)
-	uniquePoints := make(map[uint32]bool)
+    // First pass: accumulate values
+    for _, p := range points {
+        if !uniquePoints[p.ID] {
+            uniquePoints[p.ID] = true
+            totalPoints += p.NumPoints
 
-	// First pass: count frequencies of each metadata value
-	for _, p := range points {
-		if !uniquePoints[p.ID] {
-			uniquePoints[p.ID] = true
-			totalPoints += p.NumPoints
+            // Weight coordinates by point count
+            weight := float64(p.NumPoints)
+            sumX += float64(p.X) * weight
+            sumY += float64(p.Y) * weight
 
-			weight := float64(p.NumPoints)
-			sumX += float64(p.X) * weight
-			sumY += float64(p.Y) * weight
+            // Get metrics and accumulate weighted sums
+            if pointMetrics := metricsPool.Get(p.MetricIdx); pointMetrics != nil {
+                for k, v := range pointMetrics {
+                    metricSums[k] += float64(v) * float64(p.NumPoints)
+                }
+            }
 
-			// Get metrics from pool and accumulate
-			if pointMetrics := metricsPool.Get(p.MetricIdx); pointMetrics != nil {
-				for k, v := range pointMetrics {
-					if p.NumPoints > 1 {
-						// For clusters, v is already the total sum
-						metrics[k] += float64(v)
-					} else {
-						// For individual points, add the raw value
-						metrics[k] += float64(v)
-					}
-				}
-			}
+            // Count frequencies of metadata values
+            if p.Metadata != nil {
+                for k, v := range p.Metadata {
+                    if _, exists := metadataValues[k]; !exists {
+                        metadataValues[k] = make(map[interface{}]int)
+                    }
+                    metadataValues[k][v] += int(p.NumPoints)
+                }
+            }
+        }
+    }
 
-			// Count frequencies of metadata values
-			if p.Metadata != nil {
-				for k, v := range p.Metadata {
-					if _, exists := metadataValues[k]; !exists {
-						metadataValues[k] = make(map[interface{}]int)
-					}
-					metadataValues[k][v] += int(p.NumPoints)
-				}
-			}
-		}
-	}
+    // Calculate averages and create cluster
+    invTotal := 1.0 / float64(totalPoints)
+    cluster := ClusterNode{
+        ID:    uuid.New().ID(),
+        X:     float32(sumX * invTotal),
+        Y:     float32(sumY * invTotal),
+        Count: totalPoints,
+        Metrics: ClusterMetrics{
+            Values: make(map[string]float32),
+        },
+        Metadata: make(map[string]json.RawMessage),
+    }
 
-	// Calculate position averages
-	invTotal := 1.0 / float64(totalPoints)
-	cluster := ClusterNode{
-		ID:    uuid.New().ID(),
-		X:     float32(sumX * invTotal),
-		Y:     float32(sumY * invTotal),
-		Count: totalPoints,
-		Metrics: ClusterMetrics{
-			Values: make(map[string]float32),
-		},
-		Metadata: make(map[string]json.RawMessage),
-	}
+    // Calculate metric averages
+    for k, sum := range metricSums {
+        cluster.Metrics.Values[k] = float32(sum / float64(totalPoints))
+    }
 
-	// Store summed metrics
-	for k, sum := range metrics {
-		cluster.Metrics.Values[k] = float32(sum)
-	}
+    // Calculate metadata frequencies
+    for key, valueCounts := range metadataValues {
+        frequencies := make(map[string]float64)
+        total := 0
+        for _, count := range valueCounts {
+            total += count
+        }
+        for value, count := range valueCounts {
+            frequencies[fmt.Sprintf("%v", value)] = float64(count) / float64(total)
+        }
+        if jsonBytes, err := json.Marshal(frequencies); err == nil {
+            cluster.Metadata[key] = jsonBytes
+        }
+    }
 
-	// Calculate and store frequencies for all metadata values
-	for key, valueCounts := range metadataValues {
-		frequencies := make(map[string]float64)
-		total := 0
-		for _, count := range valueCounts {
-			total += count
-		}
-		for value, count := range valueCounts {
-			frequencies[fmt.Sprintf("%v", value)] = float64(count) / float64(total)
-		}
-		if jsonBytes, err := json.Marshal(frequencies); err == nil {
-			cluster.Metadata[key] = jsonBytes
-		}
-	}
-
-	return cluster
-}
-
-type ClusterMetrics struct {
-	Values map[string]float32
-}
-
-type KDBounds struct {
-	MinX, MinY, MaxX, MaxY float32
+    return cluster
 }
 
 // Extend expands bounds to include another point
@@ -790,37 +1018,8 @@ func (b *KDBounds) Extend(x, y float32) {
 	b.MaxY = float32(math.Max(float64(b.MaxY), float64(y)))
 }
 
-// Project functions are needed for GetClusters
-// projectFast converts lng/lat to tile coordinates
-func (sc *Supercluster) projectFast(lng, lat float32, zoom int) [2]float32 {
-	sin := float32(math.Sin(float64(lat) * math.Pi / 180))
-	x := (lng + 180) / 360
-	y := float32(0.5 - 0.25*math.Log(float64((1+sin)/(1-sin)))/math.Pi)
-
-	scale := float32(math.Pow(2, float64(zoom)))
-	return [2]float32{
-		x * scale * float32(sc.Options.Extent),
-		y * scale * float32(sc.Options.Extent),
-	}
-}
-
-// unprojectFast converts tile coordinates back to lng/lat
-func (sc *Supercluster) unprojectFast(x, y float32, zoom int) [2]float32 {
-	scale := float32(math.Pow(2, float64(zoom)))
-
-	// Convert to normalized coordinates
-	x = x / (scale * float32(sc.Options.Extent))
-	y = y / (scale * float32(sc.Options.Extent))
-
-	// Convert to lng/lat
-	lng := x*360 - 180
-	lat := float32(math.Atan(math.Sinh(float64(math.Pi*(1-2*y))))) * 180 / math.Pi
-
-	return [2]float32{lng, lat}
-}
-
 // projectPoints converts points from lng/lat to tile coordinates
-func (sc *Supercluster) projectPoints(points []KDPoint, zoom int, metricsPool *MetricsPool) []KDPoint {
+func (sc *Supercluster) projectPoints(points []KDPoint, zoom int) []KDPoint {
 	projectedPoints := make([]KDPoint, len(points))
 
 	for i, p := range points {
