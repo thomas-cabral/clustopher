@@ -1,7 +1,7 @@
 <script lang="ts">
     import { createEventDispatcher, onMount } from 'svelte';
     
-    const { apiBaseUrl, currentBounds } = $props<{ 
+    const { apiBaseUrl, currentBounds, selectedClusterId } = $props<{ 
         apiBaseUrl: string;
         currentBounds?: {
             north: number;
@@ -9,6 +9,10 @@
             east: number;
             west: number;
             zoom: number;
+        };
+        selectedClusterId?: string | null;
+        on: {
+            setClusterId: (event: CustomEvent<string | null>) => void;
         };
     }>();
     
@@ -135,6 +139,10 @@
         }
     }
     
+    function handleSetClusterId(clusterId: string | null) {
+        dispatch('setClusterId', clusterId);
+    }
+    
     function formatMetricName(name: string): string {
         return name
             .split('_')
@@ -160,7 +168,7 @@
     <div class="controls-section">
         <div class="header">
             <h3>Cluster Management</h3>
-            <button class="refresh" on:click={loadClusters} disabled={loading}>
+            <button class="refresh" onclick={loadClusters} disabled={loading}>
                 🔄 Refresh
             </button>
         </div>
@@ -173,7 +181,7 @@
                 min="1"
                 disabled={loading}
             />
-            <button on:click={createNewCluster} disabled={loading}>
+            <button onclick={createNewCluster} disabled={loading}>
                 {loading ? 'Creating...' : 'Create New Cluster'}
             </button>
         </div>
@@ -190,15 +198,15 @@
         {:else}
             <div class="clusters-list">
                 {#each clusters as cluster}
-                    <div class="cluster-item {cluster.id === loadedClusterId ? 'active' : ''}">
+                    <div class="cluster-item {cluster.id === selectedClusterId ? 'active' : ''}">
                         <div class="cluster-info">
                             <div class="cluster-main">
-                                <span class="points">{cluster.numPoints.toLocaleString()} points</span>
+                                <span class="points">{cluster?.numPoints?.toLocaleString()} points</span>
                                 <button class="load-button"
-                                    on:click={() => loadCluster(cluster.id)}
-                                    disabled={loading || cluster.id === loadedClusterId}
+                                    onclick={() => handleSetClusterId(cluster.id)}
+                                    disabled={loading || cluster.id === selectedClusterId}
                                 >
-                                    {cluster.id === loadedClusterId ? 'Loaded' : 'Load'}
+                                    {cluster.id === selectedClusterId ? 'Selected' : 'Select'}
                                 </button>
                             </div>
                             <div class="cluster-details">

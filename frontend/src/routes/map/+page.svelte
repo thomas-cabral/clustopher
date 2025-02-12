@@ -2,6 +2,8 @@
 <script lang="ts">
     import ClusterMap from '../../components/ClusterMap.svelte';
     import ClusterSelector from '../../components/ClusterSelector.svelte';
+    import { page } from '$app/stores';
+    import { goto } from '$app/navigation';
     
     const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
     const API_BASE_URL = 'http://localhost:8000';
@@ -14,23 +16,20 @@
         west: -180,
         zoom: 0
     });
+
+    // Get the initial cluster ID from URL if present
+    let selectedClusterId = $derived($page.url.searchParams.get('cluster'));
     
-    async function loadCluster(event: CustomEvent<string>) {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/clusters/load/${event.detail}`, {
-                method: 'POST'
-            });
-            
-            if (!response.ok) {
-                const error = await response.json();
-                throw new Error(error.error || 'Failed to load cluster');
-            }
-            
-            mapReloadTrigger++;
-            
-        } catch (error) {
-            console.error('Error loading cluster:', error);
+    function setClusterId(clusterId: string | null) {
+        // Update URL with selected cluster ID
+        const url = new URL(window.location.href);
+        if (clusterId) {
+            url.searchParams.set('cluster', clusterId);
+        } else {
+            url.searchParams.delete('cluster');
         }
+        goto(url.toString(), { replaceState: true });
+        mapReloadTrigger++;
     }
     
     function handleClusterCreated() {
@@ -51,7 +50,8 @@
         <ClusterSelector
             apiBaseUrl={API_BASE_URL}
             currentBounds={currentBounds}
-            on:selectCluster={loadCluster}
+            selectedClusterId={selectedClusterId}
+            on:setClusterId={event => setClusterId(event.detail)}
             on:clusterCreated={handleClusterCreated}
             on:clusterLoaded={handleClusterLoaded}
         />
@@ -62,6 +62,7 @@
             <ClusterMap
                 mapboxToken={MAPBOX_TOKEN}
                 apiBaseUrl={API_BASE_URL}
+                clusterId={selectedClusterId}
                 width="100%"
                 height="100%"
                 reloadTrigger={mapReloadTrigger}

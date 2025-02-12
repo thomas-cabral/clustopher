@@ -8,6 +8,7 @@
     const {
         mapboxToken,
         apiBaseUrl = 'http://localhost:8000',
+        clusterId = null,
         initialZoom = 10,
         center = [-122.4, 37.8],
         width = '800px',
@@ -17,6 +18,7 @@
     } = $props<{
         mapboxToken: string;
         apiBaseUrl?: string;
+        clusterId?: string | null;
         initialZoom?: number;
         center?: [number, number];
         width?: string;
@@ -53,6 +55,8 @@
     });
   
     async function fetchMetadata(bounds: mapboxgl.LngLatBounds, zoom: number) {
+        if (!clusterId) return;
+        
         try {
             const params = new URLSearchParams({
                 zoom: Math.floor(zoom).toString(),
@@ -62,7 +66,7 @@
                 west: bounds.getWest().toString(),
             });
 
-            const response = await fetch(`${apiBaseUrl}/api/clusters/metadata?${params}`);
+            const response = await fetch(`${apiBaseUrl}/api/clusters/${clusterId}/metadata?${params}`);
             if (!response.ok) throw new Error('Failed to fetch metadata');
             metadata = await response.json();
         } catch (error) {
@@ -71,6 +75,8 @@
     }
   
     async function fetchClusters(bounds: mapboxgl.LngLatBounds, zoom: number) {
+        if (!clusterId) return;
+        
         isLoading = true;
         try {
             await Promise.all([
@@ -84,7 +90,7 @@
                         west: bounds.getWest().toString(),
                     });
 
-                    const response = await fetch(`${apiBaseUrl}/api/clusters?${params}`);
+                    const response = await fetch(`${apiBaseUrl}/api/clusters/${clusterId}?${params}`);
                     if (!response.ok) throw new Error('Failed to fetch clusters');
                     
                     const data = await response.json();
@@ -379,22 +385,22 @@
             <div class="stats">
                 <div class="stat">
                     <label>Total Points:</label>
-                    <span>{metadata.totalPoints.toLocaleString()}</span>
+                    <span>{metadata.totalPoints?.toLocaleString()}</span>
                 </div>
                 <div class="stat">
                     <label>Clusters:</label>
-                    <span>{metadata.numClusters.toLocaleString()}</span>
+                    <span>{metadata.numClusters?.toLocaleString()}</span>
                 </div>
                 <div class="stat">
                     <label>Individual Points:</label>
-                    <span>{metadata.numSinglePoints.toLocaleString()}</span>
+                    <span>{metadata.numSinglePoints?.toLocaleString()}</span>
                 </div>
             </div>
 
-            {#if Object.keys(metadata.metricsSummary).length > 0}
+            {#if Object.keys(metadata?.metricsSummary || {}).length > 0}
                 <h4>Metrics Summary</h4>
                 <div class="metrics-summary">
-                    {#each Object.entries(metadata.metricsSummary) as [metric, stats]}
+                    {#each Object.entries(metadata?.metricsSummary || {}) as [metric, stats]}
                         <div class="metric">
                             <h5>{metric}</h5>
                             <div class="metric-stats">
@@ -407,46 +413,44 @@
                 </div>
             {/if}
 
-            {#if Object.keys(metadata.metadataSummary).length > 0}
+            {#if Object.keys(metadata?.metadataSummary || {}).length > 0}
                 <h4>Metadata Summary</h4>
                 <div class="metadata-summary">
                     {#each Object.entries(metadata.metadataSummary) as [key, value]}
                         <div class="metadata-item">
-                            {#if key === 'timestamp'}
+                            {#if value.time_range}
                                 <div class="time-range">
                                     <h5>Time Range</h5>
-                                    <div>From: {new Date(value.earliest).toLocaleString()}</div>
-                                    <div>To: {new Date(value.latest).toLocaleString()}</div>
+                                    <div>From: {new Date(value.time_range.earliest).toLocaleString()}</div>
+                                    <div>To: {new Date(value.time_range.latest).toLocaleString()}</div>
                                 </div>
-                            {:else if typeof value === 'object' && ('min' in value || 'max' in value)}
+                            {:else if value.range}
                                 <div class="range-section">
                                     <h5>{key.charAt(0).toUpperCase() + key.slice(1)}</h5>
                                     <div class="range-stats">
-                                        <div>Min: {value.min.toFixed(1)}</div>
-                                        <div>Max: {value.max.toFixed(1)}</div>
-                                        {#if 'average' in value}
-                                            <div>Avg: {value.average.toFixed(1)}</div>
+                                        <div>Min: {value.range.min.toFixed(1)}</div>
+                                        <div>Max: {value.range.max.toFixed(1)}</div>
+                                        {#if 'average' in value.range}
+                                            <div>Avg: {value.range.average.toFixed(1)}</div>
                                         {/if}
                                     </div>
                                 </div>
-                            {:else if typeof value === 'object'}
+                            {:else if value.distribution}
                                 <div class="distribution-section">
                                     <h5>{key.charAt(0).toUpperCase() + key.slice(1)}</h5>
                                     <div class="distribution-list">
-                                        {#each Object.entries(value) as [subKey, percentage]}
+                                        {#each Object.entries(value.distribution.values) as [subKey, percentage]}
                                             <div class="distribution-item">
                                                 <span>{subKey}</span>
-                                                <span>{typeof percentage === 'number' ? 
-                                                    `${percentage.toFixed(1)}%` : 
-                                                    percentage}</span>
+                                                <span>{percentage.toFixed(1)}%</span>
                                             </div>
                                         {/each}
                                     </div>
                                 </div>
-                            {:else}
+                            {:else if value.single_value}
                                 <div class="single-value">
                                     <h5>{key.charAt(0).toUpperCase() + key.slice(1)}</h5>
-                                    <span>{value}</span>
+                                    <span>{value.single_value}</span>
                                 </div>
                             {/if}
                         </div>

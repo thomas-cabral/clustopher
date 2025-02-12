@@ -4,3 +4,5 @@
 /.cursor
 
 coverage.out
+cmd/api/tmp/api
+cmd/runners/tmp/runners

@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -32,6 +35,101 @@ type MetadataRange struct {
 type TimestampRange struct {
 	Earliest time.Time `json:"earliest"`
 	Latest   time.Time `json:"latest"`
+}
+
+type SavedClusterInfo struct {
+	ID        string
+	NumPoints int
+	Timestamp time.Time
+	FileSize  int64
+}
+
+// ListSavedClusters returns information about all saved clusters
+func ListSavedClusters() ([]SavedClusterInfo, error) {
+	files, err := os.ReadDir("data/clusters")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read clusters directory: %v", err)
+	}
+
+	clusters := make([]SavedClusterInfo, 0)
+	for _, file := range files {
+		if !file.IsDir() && filepath.Ext(file.Name()) == ".zst" {
+			info, err := file.Info()
+			if err != nil {
+				continue
+			}
+
+			// Parse filename to get cluster info
+			// Format: cluster-{numPoints}p-{timestamp}-{id}.zst
+			name := strings.TrimSuffix(file.Name(), ".zst")
+			parts := strings.Split(name, "-")
+			if len(parts) != 5 {
+				continue
+			}
+
+			numPoints, err := strconv.Atoi(strings.TrimSuffix(parts[1], "p"))
+			if err != nil {
+				continue
+			}
+
+			timestamp, err := time.Parse("20060102-150405", parts[2]+"-"+parts[3])
+			if err != nil {
+				continue
+			}
+
+			clusters = append(clusters, SavedClusterInfo{
+				ID:        parts[4],
+				NumPoints: numPoints,
+				Timestamp: timestamp,
+				FileSize:  info.Size(),
+			})
+		}
+	}
+
+	return clusters, nil
+}
+
+// GetClusterInfo returns information about a specific cluster
+func GetClusterInfo(clusterID string) (*SavedClusterInfo, error) {
+	files, err := os.ReadDir("data/clusters")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read clusters directory: %v", err)
+	}
+
+	for _, file := range files {
+		if strings.Contains(file.Name(), clusterID) {
+			info, err := file.Info()
+			if err != nil {
+				return nil, err
+			}
+
+			// Parse filename to get cluster info
+			name := strings.TrimSuffix(file.Name(), ".zst")
+			parts := strings.Split(name, "-")
+			if len(parts) != 5 {
+				continue
+			}
+
+			numPoints, err := strconv.Atoi(strings.TrimSuffix(parts[1], "p"))
+			if err != nil {
+				continue
+			}
+
+			timestamp, err := time.Parse("20060102-150405", parts[2]+"-"+parts[3])
+			if err != nil {
+				continue
+			}
+
+			return &SavedClusterInfo{
+				ID:        parts[4],
+				NumPoints: numPoints,
+				Timestamp: timestamp,
+				FileSize:  info.Size(),
+			}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("cluster %s not found", clusterID)
 }
 
 func CalculateMetadataSummary(clusters []ClusterNode) MetadataSummary {
