@@ -1,0 +1,114 @@
+syntax = "proto3";
+
+package cluster;
+
+option go_package = "clustopher/proto";
+
+service ClusterService {
+  // Manage clusters
+  rpc ListClusters(ListClustersRequest) returns (ListClustersResponse) {}
+  rpc LoadCluster(LoadClusterRequest) returns (LoadClusterResponse) {}
+  rpc CreateCluster(CreateClusterRequest) returns (CreateClusterResponse) {}
+  
+  // Query clusters
+  rpc GetClusters(GetClustersRequest) returns (GetClustersResponse) {}
+  rpc GetMetadata(GetMetadataRequest) returns (GetMetadataResponse) {}
+}
+
+message ListClustersRequest {}
+
+message ClusterInfo {
+  string id = 1;
+  int32 num_points = 2;
+  string timestamp = 3;
+  int64 file_size = 4;
+}
+
+message ListClustersResponse {
+  repeated ClusterInfo clusters = 1;
+}
+
+message LoadClusterRequest {
+  string cluster_id = 1;
+}
+
+message LoadClusterResponse {
+  ClusterInfo cluster = 1;
+}
+
+message CreateClusterRequest {
+  int32 num_points = 1;
+}
+
+message CreateClusterResponse {
+  ClusterInfo cluster = 1;
+}
+
+message Bounds {
+  float min_x = 1;
+  float min_y = 2;
+  float max_x = 3;
+  float max_y = 4;
+}
+
+message GetClustersRequest {
+  string cluster_id = 1;
+  int32 zoom = 2;
+  Bounds bounds = 3;
+}
+
+message ClusterFeature {
+  float x = 1;
+  float y = 2;
+  uint32 count = 3;
+  uint32 id = 4;
+  map<string, float> metrics = 5;
+  bool is_cluster = 6;
+}
+
+message GetClustersResponse {
+  repeated ClusterFeature features = 1;
+}
+
+message GetMetadataRequest {
+  string cluster_id = 1;
+  int32 zoom = 2;
+  Bounds bounds = 3;
+}
+
+message MetricStats {
+    double min = 1;
+    double max = 2;
+    double average = 3;
+}
+
+message TimeRange {
+    string earliest = 1;
+    string latest = 2;
+}
+
+message Range {
+    double min = 1;
+    double max = 2;
+    double average = 3;
+}
+
+message Distribution {
+    map<string, double> values = 1;
+}
+
+message MetadataValue {
+    // Only one of these will be set
+    TimeRange time_range = 1;
+    Range range = 2;
+    Distribution distribution = 3;
+    string single_value = 4;
+}
+
+message GetMetadataResponse {
+    int32 total_points = 1;
+    int32 num_clusters = 2;
+    int32 num_single_points = 3;
+    map<string, MetricStats> metrics_summary = 4;
+    map<string, MetadataValue> metadata_summary = 5;
+}
