@@ -308,28 +308,14 @@ func (r *ClusterRunner) GetMetadata(ctx context.Context, req *pb.GetMetadataRequ
 	metadataSummary := make(map[string]*pb.MetadataValue)
 	for key, value := range summary.MetadataSummary {
 		switch v := value.(type) {
-		case map[string]float64: // For category and region distributions
-			// Convert percentages to match frontend expectations
-			metadataSummary[key] = &pb.MetadataValue{
-				Distribution: &pb.Distribution{
-					Values: v,
-				},
-			}
-		case struct {
-			Earliest time.Time
-			Latest   time.Time
-		}:
+		case cluster.TimestampRange:
 			metadataSummary[key] = &pb.MetadataValue{
 				TimeRange: &pb.TimeRange{
 					Earliest: v.Earliest.Format(time.RFC3339),
 					Latest:   v.Latest.Format(time.RFC3339),
 				},
 			}
-		case struct {
-			Min     float64
-			Max     float64
-			Average float64
-		}:
+		case cluster.MetadataRange:
 			metadataSummary[key] = &pb.MetadataValue{
 				Range: &pb.Range{
 					Min:     v.Min,
@@ -337,13 +323,12 @@ func (r *ClusterRunner) GetMetadata(ctx context.Context, req *pb.GetMetadataRequ
 					Average: v.Average,
 				},
 			}
-		case string:
+		case map[string]float64:
 			metadataSummary[key] = &pb.MetadataValue{
-				SingleValue: v,
+				Distribution: &pb.Distribution{
+					Values: v,
+				},
 			}
-		default:
-			// Skip unknown types
-			continue
 		}
 	}
 

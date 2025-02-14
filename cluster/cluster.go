@@ -5,13 +5,10 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
-
-	"runtime/debug"
-
-	"github.com/google/uuid"
 )
 
 // Add Pool to KDTree struct
@@ -72,9 +69,11 @@ type ClusterNode struct {
 
 // Supercluster implements the clustering algorithm
 type Supercluster struct {
-	Tree    *KDTree // Single KD-tree for all zoom levels
-	Points  []Point // Original input points
-	Options SuperclusterOptions
+	Tree      *KDTree // Single KD-tree for all zoom levels
+	Points    []Point // Original input points
+	Options   SuperclusterOptions
+	zoomScale []float64 // Pre-calculated zoom scales
+	latLookup []float32 // Pre-calculated latitude projections
 }
 
 type SuperclusterOptions struct {
@@ -102,6 +101,93 @@ type FeatureCollection struct {
 type Geometry struct {
 	Type        string    `json:"type"`
 	Coordinates []float64 `json:"coordinates"`
+}
+
+// Add object pools for frequently allocated structures
+var (
+	clusterNodePool = sync.Pool{
+		New: func() interface{} {
+			return &ClusterNode{
+				Metrics: ClusterMetrics{
+					Values: make(map[string]float32, 8), // Pre-allocate with typical size
+				},
+				Metadata: make(map[string]json.RawMessage, 4),
+			}
+		},
+	}
+
+	kdPointPool = sync.Pool{
+		New: func() interface{} {
+			return &KDPoint{
+				Metadata: make(map[string]interface{}, 4),
+			}
+		},
+	}
+)
+
+// Pre-allocate buffers for JSON encoding/decoding
+var jsonBufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 0, 1024)
+	},
+}
+
+// Add a point slice pool to reuse allocations
+var pointSlicePool = sync.Pool{
+	New: func() interface{} {
+		s := make([]KDPoint, 0, 1024) // Initial reasonable capacity
+		return &s
+	},
+}
+
+// Add string interning pool
+var stringPool = sync.Pool{
+	New: func() interface{} {
+		return make(map[string]string, 100)
+	},
+}
+
+// Add a grid cell pool to reuse slice allocations
+var gridCellPool = sync.Pool{
+	New: func() interface{} {
+		s := make([]int, 0, 32) // Typical cell capacity
+		return &s
+	},
+}
+
+// Add lookup table for common latitude values
+const (
+	latTableSize = 1024
+	latTableStep = 180.0 / float32(latTableSize)
+)
+
+// Pre-allocate common metadata keys
+var commonMetadataKeys = sync.Pool{
+	New: func() interface{} {
+		return make(map[string]struct{}, 16)
+	},
+}
+
+// Add buffer pools for loading
+var (
+	readBufferPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 32*1024) // 32KB chunks
+		},
+	}
+
+	pointsBufferPool = sync.Pool{
+		New: func() interface{} {
+			return make([]KDPoint, 0, 1024)
+		},
+	}
+)
+
+// Add a metadata value pool
+var metadataValuePool = sync.Pool{
+	New: func() interface{} {
+		return make(map[interface{}]int, 4)
+	},
 }
 
 // ToGeoJSON converts clusters to GeoJSON format
@@ -200,11 +286,33 @@ func NewSupercluster(options SuperclusterOptions) *Supercluster {
 		options.MaxZoom = 16
 	}
 
-	return &Supercluster{
-		Tree:    nil, // Will be initialized when Load() is called
-		Points:  nil, // Will be initialized when Load() is called
-		Options: options,
+	sc := &Supercluster{
+		Options:   options,
+		zoomScale: make([]float64, options.MaxZoom+1),
+		latLookup: make([]float32, latTableSize+1),
 	}
+
+	// Pre-calculate zoom scales
+	for z := 0; z <= options.MaxZoom; z++ {
+		sc.zoomScale[z] = math.Pow(2, float64(z))
+	}
+
+	for i := 0; i <= latTableSize; i++ {
+		lat := -90.0 + float64(i)*float64(latTableStep)
+		// Clamp latitude to avoid infinity
+		if lat > 85.0511 {
+			lat = 85.0511
+		} else if lat < -85.0511 {
+			lat = -85.0511
+		}
+
+		latRad := lat * math.Pi / 180.0
+		sin := math.Sin(latRad)
+		y := 0.5 - 0.25*math.Log((1+sin)/(1-sin))/math.Pi
+		sc.latLookup[i] = float32(y)
+	}
+
+	return sc
 }
 
 // Modified NewKDTree that actually uses the pools
@@ -572,33 +680,47 @@ func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
 		bounds.MinX, bounds.MinY, bounds.MaxX, bounds.MaxY)
 	fmt.Printf("Total points in tree: %d\n", len(sc.Tree.Points))
 
-	// Project bounds to tile space for current zoom level
+	// Estimate number of clusters based on viewport size
+	estimatedClusters := sc.estimateClusterCount(bounds, zoom)
+	clusters := make([]ClusterNode, 0, estimatedClusters)
+
+	// Get a slice from the pool
+	pointsPtr := pointSlicePool.Get().(*[]KDPoint)
+	points := (*pointsPtr)[:0] // Reset length but keep capacity
+	defer pointSlicePool.Put(pointsPtr)
+
+	// Pre-calculate projection for bounds once
 	minP := sc.projectFast(bounds.MinX, bounds.MaxY, zoom)
 	maxP := sc.projectFast(bounds.MaxX, bounds.MinY, zoom)
 
-	fmt.Printf("Projected bounds: Min(%f,%f) Max(%f,%f)\n",
-		minP[0], minP[1], maxP[0], maxP[1])
+	// Project points in batches to improve cache locality
+	const batchSize = 1024
+	projectedBatch := make([][2]float32, batchSize)
 
-	// Calculate clustering radius in tile coordinates
-	zoomFactor := math.Pow(2, float64(sc.Options.MaxZoom-zoom))
-	radius := float32(sc.Options.Radius * zoomFactor / float64(sc.Options.Extent))
+	for i := 0; i < len(sc.Tree.Points); i += batchSize {
+		end := i + batchSize
+		if end > len(sc.Tree.Points) {
+			end = len(sc.Tree.Points)
+		}
 
-	// Get all points in the bounds
-	var points []KDPoint
-	for i, p := range sc.Tree.Points {
-		proj := sc.projectFast(p.X, p.Y, zoom)
-		if proj[0] >= minP[0] && proj[0] <= maxP[0] &&
-			proj[1] >= minP[1] && proj[1] <= maxP[1] {
-			point := p
-			point.ID = sc.Points[i].ID
-			point.Metadata = sc.Points[i].Metadata
-			points = append(points, point)
+		// Project batch
+		batch := sc.Tree.Points[i:end]
+		for j, p := range batch {
+			projectedBatch[j] = sc.projectFast(p.X, p.Y, zoom)
+		}
+
+		// Filter points in bounds
+		for j, proj := range projectedBatch[:end-i] {
+			if proj[0] >= minP[0] && proj[0] <= maxP[0] &&
+				proj[1] >= minP[1] && proj[1] <= maxP[1] {
+				points = append(points, sc.Tree.Points[i+j])
+			}
 		}
 	}
 
 	// Project and cluster points
 	projectedPoints := sc.projectPoints(points, zoom, sc.Tree.Pool)
-	clusters := sc.clusterPoints(projectedPoints, radius)
+	clusters = append(clusters, sc.clusterPoints(projectedPoints, float32(sc.Options.Radius))...)
 
 	// Convert back to lng/lat
 	for i := range clusters {
@@ -610,16 +732,83 @@ func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
 	return clusters
 }
 
+func (sc *Supercluster) estimateClusterCount(bounds KDBounds, zoom int) int {
+	// Simple estimation based on viewport size and zoom level
+	viewportArea := float64((bounds.MaxX - bounds.MinX) * (bounds.MaxY - bounds.MinY))
+	totalArea := float64((sc.Tree.Bounds.MaxX - sc.Tree.Bounds.MinX) *
+		(sc.Tree.Bounds.MaxY - sc.Tree.Bounds.MinY))
+
+	// Avoid division by zero
+	if totalArea <= 0 {
+		return 1
+	}
+
+	ratio := viewportArea / totalArea
+	// Clamp ratio to reasonable bounds
+	if ratio < 0 {
+		ratio = 0
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+
+	totalPoints := len(sc.Tree.Points)
+
+	// At high zoom levels, more individual points
+	var estimate float64
+	if zoom >= sc.Options.MaxZoom-2 {
+		estimate = float64(totalPoints) * ratio * 0.75
+	} else {
+		// At low zoom levels, more clustering
+		estimate = float64(totalPoints) * ratio * 0.25
+	}
+
+	// Ensure we return a reasonable capacity
+	if estimate <= 0 {
+		return 1
+	}
+	if estimate > float64(totalPoints) {
+		return totalPoints
+	}
+
+	return int(estimate)
+}
+
 func (sc *Supercluster) clusterPoints(points []KDPoint, radius float32) []ClusterNode {
 	fmt.Printf("Clustering %d points with radius %f\n", len(points), radius)
 
 	var clusters []ClusterNode
 	processed := make(map[uint32]bool)
 
-	// Sort points by X coordinate to help with clustering
-	sort.Slice(points, func(i, j int) bool {
-		return points[i].X < points[j].X
-	})
+	// Use a smaller grid cell size to ensure we don't miss nearby points
+	cellSize := radius / 2 // Half the radius for better accuracy
+
+	// Pre-allocate grid with more conservative size estimate
+	estimatedCells := int(float64(len(points)) * 0.25) // Increase from 0.1 to 0.25
+	grid := make(map[[2]int]*[]int, estimatedCells)
+	defer func() {
+		for _, indices := range grid {
+			*indices = (*indices)[:0]
+			gridCellPool.Put(indices)
+		}
+	}()
+
+	// Insert points into grid using smaller cell size
+	for i, p := range points {
+		cell := [2]int{
+			int(p.X / cellSize),
+			int(p.Y / cellSize),
+		}
+
+		indices, ok := grid[cell]
+		if !ok {
+			slicePtr := gridCellPool.Get().(*[]int)
+			*slicePtr = (*slicePtr)[:0]
+			indices = slicePtr
+			grid[cell] = indices
+		}
+		*indices = append(*indices, i)
+	}
 
 	for i, p := range points {
 		if processed[p.ID] {
@@ -674,34 +863,119 @@ func (sc *Supercluster) clusterPoints(points []KDPoint, radius float32) []Cluste
 	return clusters
 }
 
-// Helper function to convert metadata to JSON.RawMessage with frequencies
+// Modify metadata conversion to use string interning
 func convertMetadataToJSON(metadata map[string]interface{}) map[string]json.RawMessage {
 	if metadata == nil {
 		return nil
 	}
 
-	result := make(map[string]json.RawMessage)
+	// Get string pool
+	strPool := stringPool.Get().(map[string]string)
+	defer func() {
+		// Clear and return to pool
+		for k := range strPool {
+			delete(strPool, k)
+		}
+		stringPool.Put(strPool)
+	}()
+
+	result := make(map[string]json.RawMessage, len(metadata))
+	buf := jsonBufferPool.Get().([]byte)
+	defer jsonBufferPool.Put(buf)
+
 	for k, v := range metadata {
-		// For single points, create a frequency map with 100% for the value
-		frequencies := map[string]float64{
-			fmt.Sprintf("%v", v): 1.0, // 100% frequency for the single value
+		// Intern string key
+		if interned, ok := strPool[k]; ok {
+			k = interned
+		} else {
+			strPool[k] = k
 		}
 
-		if jsonBytes, err := json.Marshal(frequencies); err == nil {
-			result[k] = jsonBytes
+		frequencies := map[string]float64{
+			fmt.Sprintf("%v", v): 1.0,
+		}
+
+		// Reuse buffer
+		buf = buf[:0]
+		buf, err := json.Marshal(frequencies)
+		if err == nil {
+			// Copy buffer since it will be reused
+			jsonCopy := make([]byte, len(buf))
+			copy(jsonCopy, buf)
+			result[k] = jsonCopy
 		}
 	}
 	return result
 }
 
+// Modify createCluster to use object pool
 func createCluster(points []KDPoint, metricsPool *MetricsPool) ClusterNode {
+	cluster := clusterNodePool.Get().(*ClusterNode)
+	// Reset maps instead of reallocating
+	for k := range cluster.Metrics.Values {
+		delete(cluster.Metrics.Values, k)
+	}
+	for k := range cluster.Metadata {
+		delete(cluster.Metadata, k)
+	}
+
 	var sumX, sumY float64
 	metrics := make(map[string]float64)
 	var totalPoints uint32
-
-	// Create a map to aggregate metadata
-	metadataValues := make(map[string]map[interface{}]int)
 	uniquePoints := make(map[uint32]bool)
+
+	// Get pre-allocated maps
+	metadataKeys := commonMetadataKeys.Get().(map[string]struct{})
+	defer func() {
+		for k := range metadataKeys {
+			delete(metadataKeys, k)
+		}
+		commonMetadataKeys.Put(metadataKeys)
+	}()
+
+	// First collect all unique metadata keys
+	for _, p := range points {
+		if p.Metadata != nil {
+			for k := range p.Metadata {
+				metadataKeys[k] = struct{}{}
+			}
+		}
+	}
+
+	// Get a pre-allocated map for metadata values
+	valueMap := metadataValuePool.Get().(map[interface{}]int)
+	defer func() {
+		for k := range valueMap {
+			delete(valueMap, k)
+		}
+		metadataValuePool.Put(valueMap)
+	}()
+
+	// Calculate frequencies one key at a time to reuse the map
+	for key := range metadataKeys {
+		for k := range valueMap {
+			delete(valueMap, k)
+		}
+
+		total := 0
+		for _, p := range points {
+			if v, ok := p.Metadata[key]; ok {
+				count := int(p.NumPoints)
+				valueMap[v] += count
+				total += count
+			}
+		}
+
+		// Convert to frequencies
+		frequencies := make(map[string]float64, len(valueMap))
+		for value, count := range valueMap {
+			frequencies[fmt.Sprintf("%v", value)] = float64(count) / float64(total)
+		}
+
+		if jsonBytes, err := json.Marshal(frequencies); err == nil {
+			cluster.Metadata[key] = jsonBytes
+		}
+	}
 
 	// First pass: count frequencies of each metadata value
 	for _, p := range points {
@@ -728,11 +1002,11 @@ func createCluster(points []KDPoint, metricsPool *MetricsPool) ClusterNode {
 
 			// Count frequencies of metadata values
 			if p.Metadata != nil {
-				for k, v := range p.Metadata {
-					if _, exists := metadataValues[k]; !exists {
-						metadataValues[k] = make(map[interface{}]int)
+				for _, v := range p.Metadata {
+					if _, exists := valueMap[v]; !exists {
+						valueMap[v] = 0
 					}
-					metadataValues[k][v] += int(p.NumPoints)
+					valueMap[v] += int(p.NumPoints)
 				}
 			}
 		}
@@ -740,38 +1014,18 @@ func createCluster(points []KDPoint, metricsPool *MetricsPool) ClusterNode {
 
 	// Calculate position averages
 	invTotal := 1.0 / float64(totalPoints)
-	cluster := ClusterNode{
-		ID:    uuid.New().ID(),
-		X:     float32(sumX * invTotal),
-		Y:     float32(sumY * invTotal),
-		Count: totalPoints,
-		Metrics: ClusterMetrics{
-			Values: make(map[string]float32),
-		},
-		Metadata: make(map[string]json.RawMessage),
-	}
+	cluster.X = float32(sumX * invTotal)
+	cluster.Y = float32(sumY * invTotal)
+	cluster.Count = totalPoints
 
 	// Store summed metrics
 	for k, sum := range metrics {
 		cluster.Metrics.Values[k] = float32(sum)
 	}
 
-	// Calculate and store frequencies for all metadata values
-	for key, valueCounts := range metadataValues {
-		frequencies := make(map[string]float64)
-		total := 0
-		for _, count := range valueCounts {
-			total += count
-		}
-		for value, count := range valueCounts {
-			frequencies[fmt.Sprintf("%v", value)] = float64(count) / float64(total)
-		}
-		if jsonBytes, err := json.Marshal(frequencies); err == nil {
-			cluster.Metadata[key] = jsonBytes
-		}
-	}
-
-	return cluster
+	// Don't put back in pool if it will be used
+	// clusterNodePool.Put(cluster)
+	return *cluster
 }
 
 type ClusterMetrics struct {
@@ -790,18 +1044,39 @@ func (b *KDBounds) Extend(x, y float32) {
 	b.MaxY = float32(math.Max(float64(b.MaxY), float64(y)))
 }
 
-// Project functions are needed for GetClusters
 // projectFast converts lng/lat to tile coordinates
 func (sc *Supercluster) projectFast(lng, lat float32, zoom int) [2]float32 {
-	sin := float32(math.Sin(float64(lat) * math.Pi / 180))
-	x := (lng + 180) / 360
-	y := float32(0.5 - 0.25*math.Log(float64((1+sin)/(1-sin)))/math.Pi)
-
-	scale := float32(math.Pow(2, float64(zoom)))
-	return [2]float32{
-		x * scale * float32(sc.Options.Extent),
-		y * scale * float32(sc.Options.Extent),
+	if zoom < 0 || zoom >= len(sc.zoomScale) {
+		zoom = 0
 	}
+
+	scale := float32(sc.zoomScale[zoom])
+	extent := float32(sc.Options.Extent)
+	scaleExtent := scale * extent
+
+	// Clamp latitude to avoid infinity in Mercator projection
+	if lat > 85.0511 {
+		lat = 85.0511
+	} else if lat < -85.0511 {
+		lat = -85.0511
+	}
+
+	// Use lookup table with interpolation for better accuracy
+	latIdx := int((lat + 90.0) / latTableStep)
+	if latIdx < 0 {
+		latIdx = 0
+	} else if latIdx >= latTableSize {
+		latIdx = latTableSize - 1
+	}
+
+	// Linear interpolation between lookup table values
+	latFrac := (lat+90.0)/latTableStep - float32(latIdx)
+	y1 := sc.latLookup[latIdx]
+	y2 := sc.latLookup[latIdx+1]
+	y := (y1 + (y2-y1)*latFrac) * scaleExtent
+
+	x := (lng + 180.0) * (scaleExtent / 360.0)
+	return [2]float32{x, y}
 }
 
 // unprojectFast converts tile coordinates back to lng/lat

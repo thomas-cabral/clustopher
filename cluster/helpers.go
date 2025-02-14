@@ -194,6 +194,52 @@ func CalculateMetadataSummary(clusters []ClusterNode) MetadataSummary {
 				metadataValues[key] = make(map[string]int)
 			}
 
+			var value interface{}
+			if err := json.Unmarshal(rawValue, &value); err == nil {
+				// First try to handle the value directly for single values
+				switch v := value.(type) {
+				case float64:
+					stats, exists := numericMetadata[key]
+					if !exists {
+						stats.min = v
+						stats.max = v
+					} else {
+						if v < stats.min {
+							stats.min = v
+						}
+						if v > stats.max {
+							stats.max = v
+						}
+					}
+					stats.sum += v * float64(c.Count)
+					stats.count += int(c.Count)
+					numericMetadata[key] = stats
+					continue
+				case string:
+					if ts, err := time.Parse(time.RFC3339, v); err == nil {
+						timeRange, exists := timestampRanges[key]
+						if !exists {
+							timeRange = TimestampRange{
+								Earliest: ts,
+								Latest:   ts,
+							}
+						} else {
+							if ts.Before(timeRange.Earliest) {
+								timeRange.Earliest = ts
+							}
+							if ts.After(timeRange.Latest) {
+								timeRange.Latest = ts
+							}
+						}
+						timestampRanges[key] = timeRange
+					} else {
+						metadataValues[key][v] += int(c.Count)
+					}
+					continue
+				}
+			}
+
+			// If not a single value, try to unmarshal as frequencies
 			var frequencies map[string]float64
 			if err := json.Unmarshal(rawValue, &frequencies); err == nil {
 				for value, freq := range frequencies {
@@ -239,6 +285,10 @@ func CalculateMetadataSummary(clusters []ClusterNode) MetadataSummary {
 						metadataValues[key][value] += count
 					}
 				}
+			} else {
+				// Handle as string value if not a frequency map
+				strValue := fmt.Sprintf("%v", rawValue)
+				metadataValues[key][strValue] += int(c.Count)
 			}
 		}
 	}

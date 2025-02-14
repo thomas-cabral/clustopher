@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -102,21 +101,19 @@ func (sc *Supercluster) SaveCompressed(filename string) error {
 }
 
 func LoadCompressedSupercluster(filename string) (*Supercluster, error) {
-	start := time.Now()
 	file, err := os.Open(filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %v", err)
 	}
 	defer file.Close()
 
-	bufReader := bufio.NewReaderSize(file, 1024*1024)
-	dec, err := zstd.NewReader(bufReader)
+	dec, err := zstd.NewReader(file)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create zstd reader: %v", err)
 	}
 	defer dec.Close()
 
-	// Read sizes
+	// Read sizes first
 	var numNodes, numPoints, numMetrics uint32
 	binary.Read(dec, binary.LittleEndian, &numNodes)
 	binary.Read(dec, binary.LittleEndian, &numPoints)
@@ -134,8 +131,18 @@ func LoadCompressedSupercluster(filename string) (*Supercluster, error) {
 	// Create cluster with options
 	sc := NewSupercluster(options)
 
-	// Read nodes
+	// Pre-allocate slices with exact sizes
 	nodes := make([]KDNode, numNodes)
+	points := make([]KDPoint, 0, numPoints)
+	metricsPool := &MetricsPool{
+		Metrics: make([]map[string]float32, 0, numMetrics),
+		Lookup:  make(map[string]int),
+	}
+
+	// Read nodes in chunks
+	buf := readBufferPool.Get().([]byte)
+	defer readBufferPool.Put(buf)
+
 	for i := range nodes {
 		binary.Read(dec, binary.LittleEndian, &nodes[i].PointIdx)
 		binary.Read(dec, binary.LittleEndian, &nodes[i].Left)
@@ -145,55 +152,46 @@ func LoadCompressedSupercluster(filename string) (*Supercluster, error) {
 		binary.Read(dec, binary.LittleEndian, &nodes[i].MaxChild)
 	}
 
-	fmt.Printf("Nodes read took: %v\n", time.Since(start))
-	pointsStart := time.Now()
+	// Read points in chunks
+	for i := uint32(0); i < numPoints; i++ {
+		var point KDPoint
+		binary.Read(dec, binary.LittleEndian, &point.X)
+		binary.Read(dec, binary.LittleEndian, &point.Y)
+		binary.Read(dec, binary.LittleEndian, &point.ID)
+		binary.Read(dec, binary.LittleEndian, &point.NumPoints)
+		binary.Read(dec, binary.LittleEndian, &point.MetricIdx)
 
-	// Read points
-	points := make([]KDPoint, numPoints)
-	for i := range points {
-		binary.Read(dec, binary.LittleEndian, &points[i].X)
-		binary.Read(dec, binary.LittleEndian, &points[i].Y)
-		binary.Read(dec, binary.LittleEndian, &points[i].ID)
-		binary.Read(dec, binary.LittleEndian, &points[i].NumPoints)
-		binary.Read(dec, binary.LittleEndian, &points[i].MetricIdx)
-
-		// Read metadata
+		// Read metadata size
 		var metadataSize uint32
 		binary.Read(dec, binary.LittleEndian, &metadataSize)
 
-		points[i].Metadata = make(map[string]interface{}, metadataSize)
+		if metadataSize > 0 {
+			point.Metadata = make(map[string]interface{}, metadataSize)
 
-		// Read each metadata key-value pair
-		for j := uint32(0); j < metadataSize; j++ {
-			// Read key
-			var keySize uint32
-			binary.Read(dec, binary.LittleEndian, &keySize)
-			keyBytes := make([]byte, keySize)
-			io.ReadFull(dec, keyBytes)
+			// Read metadata key-value pairs
+			for j := uint32(0); j < metadataSize; j++ {
+				var keySize, valueSize uint32
+				binary.Read(dec, binary.LittleEndian, &keySize)
 
-			// Read value
-			var valueSize uint32
-			binary.Read(dec, binary.LittleEndian, &valueSize)
-			valueBytes := make([]byte, valueSize)
-			io.ReadFull(dec, valueBytes)
+				keyBuf := buf[:keySize]
+				io.ReadFull(dec, keyBuf)
+				key := string(keyBuf)
 
-			// Unmarshal value
-			var value interface{}
-			if err := json.Unmarshal(valueBytes, &value); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal metadata value: %v", err)
+				binary.Read(dec, binary.LittleEndian, &valueSize)
+				valueBuf := buf[keySize : keySize+valueSize]
+				io.ReadFull(dec, valueBuf)
+
+				var value interface{}
+				json.Unmarshal(valueBuf, &value)
+				point.Metadata[key] = value
 			}
-
-			points[i].Metadata[string(keyBytes)] = value
 		}
+
+		points = append(points, point)
 	}
 
-	fmt.Printf("Points read took: %v\n", time.Since(pointsStart))
-	metricsStart := time.Now()
-
 	// Read metrics pool
-	metricsPool := NewMetricsPool()
 	metricsPool.Metrics = make([]map[string]float32, numMetrics)
-
 	for i := range metricsPool.Metrics {
 		var numPairs uint32
 		binary.Read(dec, binary.LittleEndian, &numPairs)
@@ -203,39 +201,25 @@ func LoadCompressedSupercluster(filename string) (*Supercluster, error) {
 			var keyLen uint32
 			binary.Read(dec, binary.LittleEndian, &keyLen)
 
-			keyBytes := make([]byte, keyLen)
-			io.ReadFull(dec, keyBytes)
+			keyBuf := buf[:keyLen]
+			io.ReadFull(dec, keyBuf)
+			key := string(keyBuf)
 
 			var value float32
 			binary.Read(dec, binary.LittleEndian, &value)
 
-			metrics[string(keyBytes)] = value
+			metrics[key] = value
 		}
 		metricsPool.Metrics[i] = metrics
 	}
 
-	fmt.Printf("Metrics read took: %v\n", time.Since(metricsStart))
-
-	// Reconstruct original points
-	originalPoints := make([]Point, numPoints)
-	for i, kdPoint := range points {
-		originalPoints[i] = Point{
-			ID:       kdPoint.ID,
-			X:        kdPoint.X,
-			Y:        kdPoint.Y,
-			Metrics:  metricsPool.Get(kdPoint.MetricIdx),
-			Metadata: kdPoint.Metadata,
-		}
-	}
-
+	// Build tree
 	sc.Tree = &KDTree{
-		Pool:     metricsPool,
-		NodeSize: options.NodeSize,
 		Nodes:    nodes,
 		Points:   points,
+		NodeSize: options.NodeSize,
+		Pool:     metricsPool,
 	}
-	sc.Points = originalPoints // Set the original points
 
-	fmt.Printf("Total load time: %v\n", time.Since(start))
 	return sc, nil
 }
