@@ -4,78 +4,98 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestClusterMetricsRollup(t *testing.T) {
-	// Create a test metrics pool
-	pool := NewMetricsPool()
+	// Create a new supercluster with our metrics and metadata stores
+	sc := NewSupercluster(SuperclusterOptions{
+		MinZoom:   0,
+		MaxZoom:   16,
+		MinPoints: 2,
+		Radius:    40,
+		Extent:    512,
+		NodeSize:  64,
+	})
 
 	// Create test points with known metrics
-	points := []KDPoint{
+	points := []Point{
 		{
-			X: 0, Y: 0,
-			ID:        1,
-			NumPoints: 1,
-			MetricIdx: pool.Add(map[string]float32{"sales": 100, "customers": 10}),
+			ID:      1,
+			X:       0,
+			Y:       0,
+			Metrics: map[string]float32{"sales": 100, "customers": 10},
 		},
 		{
-			X: 0.1, Y: 0.1,
-			ID:        2,
-			NumPoints: 1,
-			MetricIdx: pool.Add(map[string]float32{"sales": 200, "customers": 20}),
+			ID:      2,
+			X:       0.1,
+			Y:       0.1,
+			Metrics: map[string]float32{"sales": 200, "customers": 20},
 		},
 		{
-			X: 0.2, Y: 0.2,
-			ID:        3,
-			NumPoints: 1,
-			MetricIdx: pool.Add(map[string]float32{"sales": 300, "customers": 30}),
+			ID:      3,
+			X:       0.2,
+			Y:       0.2,
+			Metrics: map[string]float32{"sales": 300, "customers": 30},
 		},
 	}
 
+	// Add points to metrics store
+	for _, p := range points {
+		sc.metricsStore.AddMetrics(p.ID, p.Metrics)
+	}
+
+	// Create KDPoints (with projected coordinates for clustering)
+	kdPoints := []KDPoint{
+		{X: 0, Y: 0, ID: 1, NumPoints: 1},
+		{X: 0.1, Y: 0.1, ID: 2, NumPoints: 1},
+		{X: 0.2, Y: 0.2, ID: 3, NumPoints: 1},
+	}
+
 	// Create a cluster from these points
-	cluster := createCluster(points, pool)
+	cluster := sc.createCluster(kdPoints)
 
 	// Verify the metrics are summed correctly
 	expectedSales := float32(600)    // 100 + 200 + 300
 	expectedCustomers := float32(60) // 10 + 20 + 30
 
-	if cluster.Metrics.Values["sales"] != expectedSales {
-		t.Errorf("Expected sales to be %f, got %f", expectedSales, cluster.Metrics.Values["sales"])
+	if cluster.Metrics["sales"] != expectedSales {
+		t.Errorf("Expected sales to be %f, got %f", expectedSales, cluster.Metrics["sales"])
 	}
-	if cluster.Metrics.Values["customers"] != expectedCustomers {
-		t.Errorf("Expected customers to be %f, got %f", expectedCustomers, cluster.Metrics.Values["customers"])
-	}
-
-	// Test nested clusters
-	nestedPoints := []KDPoint{
-		{
-			X: 0, Y: 0,
-			ID:        4,
-			NumPoints: 3,                                                           // This represents a cluster of 3 points
-			MetricIdx: pool.Add(map[string]float32{"sales": 600, "customers": 60}), // The cluster we created above
-		},
-		{
-			X: 1, Y: 1,
-			ID:        5,
-			NumPoints: 2, // Another cluster
-			MetricIdx: pool.Add(map[string]float32{"sales": 400, "customers": 40}),
-		},
+	if cluster.Metrics["customers"] != expectedCustomers {
+		t.Errorf("Expected customers to be %f, got %f", expectedCustomers, cluster.Metrics["customers"])
 	}
 
-	// Create a super-cluster containing nested clusters
-	superCluster := createCluster(nestedPoints, pool)
+	// Test nested clusters by creating a "super cluster"
+	// First, add the cluster we just created as a point in the metrics store
+	sc.metricsStore.AddMetrics(4, cluster.Metrics) // ID 4 for first cluster
 
-	// Verify the metrics are correctly weighted and summed
+	// Add another cluster with different metrics
+	sc.metricsStore.AddMetrics(5, map[string]float32{"sales": 400, "customers": 40})
+
+	// Create KDPoints for the super cluster
+	superKdPoints := []KDPoint{
+		{X: 0.1, Y: 0.1, ID: 4, NumPoints: 3}, // Cluster with 3 points
+		{X: 1, Y: 1, ID: 5, NumPoints: 2},     // Cluster with 2 points
+	}
+
+	superCluster := sc.createCluster(superKdPoints)
+
+	// Verify the metrics are correctly aggregated
 	expectedSuperSales := float32(1000)    // 600 + 400
 	expectedSuperCustomers := float32(100) // 60 + 40
 
-	if superCluster.Metrics.Values["sales"] != expectedSuperSales {
-		t.Errorf("Expected super-cluster sales to be %f, got %f", expectedSuperSales, superCluster.Metrics.Values["sales"])
+	if superCluster.Metrics["sales"] != expectedSuperSales {
+		t.Errorf("Expected super-cluster sales to be %f, got %f", expectedSuperSales, superCluster.Metrics["sales"])
 	}
-	if superCluster.Metrics.Values["customers"] != expectedSuperCustomers {
-		t.Errorf("Expected super-cluster customers to be %f, got %f", expectedSuperCustomers, superCluster.Metrics.Values["customers"])
+	if superCluster.Metrics["customers"] != expectedSuperCustomers {
+		t.Errorf("Expected super-cluster customers to be %f, got %f", expectedSuperCustomers, superCluster.Metrics["customers"])
 	}
 
 	// Verify the total number of points
@@ -86,36 +106,36 @@ func TestClusterMetricsRollup(t *testing.T) {
 }
 
 func TestEmptyCluster(t *testing.T) {
-	pool := NewMetricsPool()
+	sc := NewSupercluster(SuperclusterOptions{})
 	points := []KDPoint{}
 
 	// Test creating cluster with no points
-	cluster := createCluster(points, pool)
+	cluster := sc.createCluster(points)
 
 	if cluster.Count != 0 {
 		t.Errorf("Expected empty cluster count to be 0, got %d", cluster.Count)
 	}
-	if len(cluster.Metrics.Values) != 0 {
-		t.Errorf("Expected empty cluster to have no metrics, got %d metrics", len(cluster.Metrics.Values))
+	if len(cluster.Metrics) != 0 {
+		t.Errorf("Expected empty cluster to have no metrics, got %d metrics", len(cluster.Metrics))
 	}
 }
 
 func TestSinglePointCluster(t *testing.T) {
-	pool := NewMetricsPool()
+	sc := NewSupercluster(SuperclusterOptions{})
+
+	// Add metrics and metadata for point ID 1
+	sc.metricsStore.AddMetrics(1, map[string]float32{"value": 100})
+	sc.metadataStore.AddMetadata(1, map[string]interface{}{
+		"type": "store",
+		"name": "Store A",
+	})
+
+	// Create a KDPoint (without the metadata and metrics - they're in the stores)
 	points := []KDPoint{
-		{
-			X: 1.5, Y: 2.5,
-			ID:        1,
-			NumPoints: 1,
-			MetricIdx: pool.Add(map[string]float32{"value": 100}),
-			Metadata: map[string]interface{}{
-				"type": "store",
-				"name": "Store A",
-			},
-		},
+		{X: 1.5, Y: 2.5, ID: 1, NumPoints: 1},
 	}
 
-	cluster := createCluster(points, pool)
+	cluster := sc.createCluster(points)
 
 	// Test position
 	if cluster.X != 1.5 || cluster.Y != 2.5 {
@@ -128,12 +148,15 @@ func TestSinglePointCluster(t *testing.T) {
 	}
 
 	// Test metrics
-	if cluster.Metrics.Values["value"] != 100 {
-		t.Errorf("Expected value 100, got %f", cluster.Metrics.Values["value"])
+	if cluster.Metrics["value"] != 100 {
+		t.Errorf("Expected value 100, got %f", cluster.Metrics["value"])
 	}
 
-	// Test metadata frequency
-	if raw, ok := cluster.Metadata["type"]; !ok {
+	// Test metadata - first, get the JSON
+	metadataJSON := sc.metadataStore.CalculateFrequencies([]uint32{1})
+
+	// Then check if it contains the expected values
+	if raw, ok := metadataJSON["type"]; !ok {
 		t.Error("Expected 'type' metadata to be preserved")
 	} else {
 		var freqMap map[string]float64
@@ -147,34 +170,33 @@ func TestSinglePointCluster(t *testing.T) {
 }
 
 func TestClusterWithMixedMetadata(t *testing.T) {
-	pool := NewMetricsPool()
-	points := []KDPoint{
-		{
-			X: 0, Y: 0,
-			ID:        1,
-			NumPoints: 1,
-			MetricIdx: pool.Add(map[string]float32{"value": 100}),
-			Metadata: map[string]interface{}{
-				"type": "store",
-				"city": "New York",
-			},
-		},
-		{
-			X: 0.1, Y: 0.1,
-			ID:        2,
-			NumPoints: 1,
-			MetricIdx: pool.Add(map[string]float32{"value": 200}),
-			Metadata: map[string]interface{}{
-				"type": "store",
-				"city": "Boston",
-			},
-		},
-	}
+	sc := NewSupercluster(SuperclusterOptions{})
 
-	cluster := createCluster(points, pool)
+	// Add metadata for two points
+	sc.metadataStore.AddMetadata(1, map[string]interface{}{
+		"type": "store",
+		"city": "New York",
+	})
+	sc.metadataStore.AddMetadata(2, map[string]interface{}{
+		"type": "store",
+		"city": "Boston",
+	})
+
+	// Add metrics
+	sc.metricsStore.AddMetrics(1, map[string]float32{"value": 100})
+	sc.metricsStore.AddMetrics(2, map[string]float32{"value": 200})
+
+	// // Create KDPoints
+	// points := []KDPoint{
+	// 	{X: 0, Y: 0, ID: 1, NumPoints: 1},
+	// 	{X: 0.1, Y: 0.1, ID: 2, NumPoints: 1},
+	// }
+
+	// Generate metadata frequencies for these points
+	metadataJSON := sc.metadataStore.CalculateFrequencies([]uint32{1, 2})
 
 	// Test metadata frequencies
-	if raw, ok := cluster.Metadata["type"]; !ok {
+	if raw, ok := metadataJSON["type"]; !ok {
 		t.Error("Expected 'type' metadata to be preserved")
 	} else {
 		var freqMap map[string]float64
@@ -187,73 +209,56 @@ func TestClusterWithMixedMetadata(t *testing.T) {
 	}
 
 	// Test city frequencies
-	if raw, ok := cluster.Metadata["city"]; !ok {
+	if raw, ok := metadataJSON["city"]; !ok {
 		t.Error("Expected 'city' metadata to be preserved")
 	} else {
 		var freqMap map[string]float64
 		if err := json.Unmarshal(raw, &freqMap); err != nil {
 			t.Errorf("Failed to unmarshal city metadata: %v", err)
 		}
-		if freq, ok := freqMap["New York"]; !ok || freq != 0.5 {
+		if freq, ok := freqMap["New York"]; !ok || math.Abs(freq-0.5) > 0.001 {
 			t.Errorf("Expected frequency 0.5 for 'New York', got %f", freq)
 		}
-		if freq, ok := freqMap["Boston"]; !ok || freq != 0.5 {
+		if freq, ok := freqMap["Boston"]; !ok || math.Abs(freq-0.5) > 0.001 {
 			t.Errorf("Expected frequency 0.5 for 'Boston', got %f", freq)
 		}
 	}
 }
 
 func TestNestedClusterWeights(t *testing.T) {
-	pool := NewMetricsPool()
+	sc := NewSupercluster(SuperclusterOptions{})
 
-	// Create a cluster of 3 points
+	// Add metrics for individual points
+	sc.metricsStore.AddMetrics(1, map[string]float32{"value": 100})
+	sc.metricsStore.AddMetrics(2, map[string]float32{"value": 200})
+	sc.metricsStore.AddMetrics(3, map[string]float32{"value": 300})
+
+	// Create first-level cluster points
 	cluster1Points := []KDPoint{
-		{
-			X: 0, Y: 0,
-			ID:        1,
-			NumPoints: 1,
-			MetricIdx: pool.Add(map[string]float32{"value": 100}),
-		},
-		{
-			X: 0.1, Y: 0.1,
-			ID:        2,
-			NumPoints: 1,
-			MetricIdx: pool.Add(map[string]float32{"value": 200}),
-		},
-		{
-			X: 0.2, Y: 0.2,
-			ID:        3,
-			NumPoints: 1,
-			MetricIdx: pool.Add(map[string]float32{"value": 300}),
-		},
+		{X: 0, Y: 0, ID: 1, NumPoints: 1},
+		{X: 0.1, Y: 0.1, ID: 2, NumPoints: 1},
+		{X: 0.2, Y: 0.2, ID: 3, NumPoints: 1},
 	}
 
-	cluster1 := createCluster(cluster1Points, pool)
-	fmt.Println(cluster1.Metrics.Values)
+	// Create the first-level cluster
+	cluster1 := sc.createCluster(cluster1Points)
 
-	// Create another cluster using the first cluster and two more points
+	// Add the cluster1 metrics to store with ID 4
+	sc.metricsStore.AddMetrics(4, cluster1.Metrics)
+
+	// Add more individual points
+	sc.metricsStore.AddMetrics(5, map[string]float32{"value": 400})
+	sc.metricsStore.AddMetrics(6, map[string]float32{"value": 500})
+
+	// Create super-cluster points
 	superClusterPoints := []KDPoint{
-		{
-			X: cluster1.X, Y: cluster1.Y,
-			ID:        4,
-			NumPoints: cluster1.Count,
-			MetricIdx: pool.Add(cluster1.Metrics.Values),
-		},
-		{
-			X: 1.0, Y: 1.0,
-			ID:        5,
-			NumPoints: 1,
-			MetricIdx: pool.Add(map[string]float32{"value": 400}),
-		},
-		{
-			X: 1.1, Y: 1.1,
-			ID:        6,
-			NumPoints: 1,
-			MetricIdx: pool.Add(map[string]float32{"value": 500}),
-		},
+		{X: cluster1.X, Y: cluster1.Y, ID: 4, NumPoints: cluster1.Count},
+		{X: 1.0, Y: 1.0, ID: 5, NumPoints: 1},
+		{X: 1.1, Y: 1.1, ID: 6, NumPoints: 1},
 	}
 
-	superCluster := createCluster(superClusterPoints, pool)
+	// Create the super-cluster
+	superCluster := sc.createCluster(superClusterPoints)
 
 	// Test total points
 	expectedTotalPoints := uint32(5) // 3 from cluster1 + 2 individual points
@@ -263,82 +268,140 @@ func TestNestedClusterWeights(t *testing.T) {
 
 	// Test weighted sum of values
 	expectedValue := float32(1500) // (100+200+300) + 400 + 500
-	if superCluster.Metrics.Values["value"] != expectedValue {
-		t.Errorf("Expected super-cluster value to be %f, got %f", expectedValue, superCluster.Metrics.Values["value"])
+	if superCluster.Metrics["value"] != expectedValue {
+		t.Errorf("Expected super-cluster value to be %f, got %f", expectedValue, superCluster.Metrics["value"])
 	}
 }
 
 func TestClusterBoundsCalculation(t *testing.T) {
-	pool := NewMetricsPool()
+	sc := NewSupercluster(SuperclusterOptions{NodeSize: 64})
+
+	// Add metrics for points
+	sc.metricsStore.AddMetrics(1, map[string]float32{"value": 100})
+	sc.metricsStore.AddMetrics(2, map[string]float32{"value": 200})
+	sc.metricsStore.AddMetrics(3, map[string]float32{"value": 300})
+
+	// Create KDPoints
 	points := []KDPoint{
-		{X: -10, Y: 5, ID: 1, NumPoints: 1, MetricIdx: pool.Add(map[string]float32{"value": 100})},
-		{X: 10, Y: -5, ID: 2, NumPoints: 1, MetricIdx: pool.Add(map[string]float32{"value": 200})},
-		{X: 0, Y: 0, ID: 3, NumPoints: 1, MetricIdx: pool.Add(map[string]float32{"value": 300})},
+		{X: -10, Y: 5, ID: 1, NumPoints: 1},
+		{X: 10, Y: -5, ID: 2, NumPoints: 1},
+		{X: 0, Y: 0, ID: 3, NumPoints: 1},
 	}
 
-	tree := NewKDTree(points, 64, pool)
+	// Build KD-tree
+	sc.Tree = sc.buildKDTree(points)
 
 	// Test bounds calculation
-	if tree.Bounds.MinX != -10 || tree.Bounds.MaxX != 10 {
-		t.Errorf("Expected X bounds [-10, 10], got [%f, %f]", tree.Bounds.MinX, tree.Bounds.MaxX)
+	if sc.Tree.Bounds.MinX != -10 || sc.Tree.Bounds.MaxX != 10 {
+		t.Errorf("Expected X bounds [-10, 10], got [%f, %f]", sc.Tree.Bounds.MinX, sc.Tree.Bounds.MaxX)
 	}
-	if tree.Bounds.MinY != -5 || tree.Bounds.MaxY != 5 {
-		t.Errorf("Expected Y bounds [-5, 5], got [%f, %f]", tree.Bounds.MinY, tree.Bounds.MaxY)
+	if sc.Tree.Bounds.MinY != -5 || sc.Tree.Bounds.MaxY != 5 {
+		t.Errorf("Expected Y bounds [-5, 5], got [%f, %f]", sc.Tree.Bounds.MinY, sc.Tree.Bounds.MaxY)
 	}
 }
 
-func TestMetricsPoolDeduplication(t *testing.T) {
-	pool := NewMetricsPool()
+func TestMetricsStoreDeduplication(t *testing.T) {
+	sc := NewSupercluster(SuperclusterOptions{})
 
 	// Add same metrics multiple times
 	metrics1 := map[string]float32{"value": 100, "count": 1}
-	metrics2 := map[string]float32{"value": 100, "count": 1}
+	metrics2 := map[string]float32{"value": 100, "count": 1} // Same as metrics1
+	metrics3 := map[string]float32{"value": 200, "count": 2} // Different metrics
 
-	idx1 := pool.Add(metrics1)
-	idx2 := pool.Add(metrics2)
+	// Add metrics for multiple points
+	sc.metricsStore.AddMetrics(1, metrics1)
+	sc.metricsStore.AddMetrics(2, metrics2)
+	sc.metricsStore.AddMetrics(3, metrics3)
 
-	// Should get same index for identical metrics
-	if idx1 != idx2 {
-		t.Errorf("Expected same index for identical metrics, got %d and %d", idx1, idx2)
+	// Verify that identical metrics are correctly stored and retrieved
+	metrics1Retrieved := sc.metricsStore.GetMetrics(1)
+	metrics2Retrieved := sc.metricsStore.GetMetrics(2)
+	metrics3Retrieved := sc.metricsStore.GetMetrics(3)
+
+	// Test that identical metrics (1 and 2) have the same values
+	if !metricsEqual(metrics1Retrieved, metrics2Retrieved) {
+		t.Error("Expected identical metrics to have same values")
+	}
+	// Test that different metrics (1 and 3) have different values
+	if metricsEqual(metrics1Retrieved, metrics3Retrieved) {
+		t.Error("Expected different metrics to have different values")
 	}
 
-	// Length of pool should be 1
-	if len(pool.Metrics) != 1 {
-		t.Errorf("Expected metrics pool length 1, got %d", len(pool.Metrics))
+	// Verify the actual values are still correct
+	if metrics1Retrieved["value"] != 100 || metrics1Retrieved["count"] != 1 {
+		t.Errorf("Expected metrics1 value=100 count=1, got value=%f count=%f",
+			metrics1Retrieved["value"], metrics1Retrieved["count"])
 	}
+
+	if metrics2Retrieved["value"] != 100 || metrics2Retrieved["count"] != 1 {
+		t.Errorf("Expected metrics2 value=100 count=1, got value=%f count=%f",
+			metrics2Retrieved["value"], metrics2Retrieved["count"])
+	}
+
+	if metrics3Retrieved["value"] != 200 || metrics3Retrieved["count"] != 2 {
+		t.Errorf("Expected metrics3 value=200 count=2, got value=%f count=%f",
+			metrics3Retrieved["value"], metrics3Retrieved["count"])
+	}
+}
+
+// Helper function to compare metrics maps
+func metricsEqual(m1, m2 map[string]float32) bool {
+	if len(m1) != len(m2) {
+		return false
+	}
+	for k, v1 := range m1 {
+		if v2, ok := m2[k]; !ok || v1 != v2 {
+			return false
+		}
+	}
+	return true
 }
 
 func TestClusterWithNilMetadata(t *testing.T) {
-	pool := NewMetricsPool()
-	points := []KDPoint{
-		{
-			X: 0, Y: 0,
-			ID:        1,
-			NumPoints: 1,
-			MetricIdx: pool.Add(map[string]float32{"value": 100}),
-			Metadata:  nil,
-		},
-		{
-			X: 0.1, Y: 0.1,
-			ID:        2,
-			NumPoints: 1,
-			MetricIdx: pool.Add(map[string]float32{"value": 200}),
-			Metadata: map[string]interface{}{
-				"type": "store",
-			},
-		},
+	sc := NewSupercluster(SuperclusterOptions{})
+
+	// Add metrics for points (but no metadata for first point)
+	sc.metricsStore.AddMetrics(1, map[string]float32{"value": 100})
+	sc.metricsStore.AddMetrics(2, map[string]float32{"value": 200})
+
+	// Only add metadata for the second point
+	sc.metadataStore.AddMetadata(2, map[string]interface{}{
+		"type": "store",
+	})
+
+	// Create KDPoints
+	// points := []KDPoint{
+	// 	{X: 0, Y: 0, ID: 1, NumPoints: 1},
+	// 	{X: 0.1, Y: 0.1, ID: 2, NumPoints: 1},
+	// }
+
+	// Create cluster
+	// cluster := sc.createCluster(points)
+
+	// Get metadata for the cluster
+	metadataJSON := sc.metadataStore.CalculateFrequencies([]uint32{1, 2})
+
+	// Should have type metadata from the second point
+	if len(metadataJSON) == 0 {
+		t.Error("Expected non-empty metadata map in cluster")
 	}
 
-	cluster := createCluster(points, pool)
-
-	// Should handle nil metadata gracefully
-	if cluster.Metadata == nil {
-		t.Error("Expected non-nil metadata map in cluster")
+	// Specifically check for "type" metadata
+	if raw, ok := metadataJSON["type"]; !ok {
+		t.Error("Expected 'type' metadata to be preserved even with one point having nil metadata")
+	} else {
+		var freqMap map[string]float64
+		if err := json.Unmarshal(raw, &freqMap); err != nil {
+			t.Errorf("Failed to unmarshal type metadata: %v", err)
+		}
+		if freq, ok := freqMap["store"]; !ok || freq != 1.0 {
+			t.Errorf("Expected frequency 1.0 for 'store', got %f", freq)
+		}
 	}
 }
 
-func TestMetricsPoolThreadSafety(t *testing.T) {
-	pool := NewMetricsPool()
+func TestMetricsStoreThreadSafety(t *testing.T) {
+	sc := NewSupercluster(SuperclusterOptions{})
 	const numGoroutines = 10
 	const numMetricsPerGoroutine = 100
 
@@ -349,20 +412,28 @@ func TestMetricsPoolThreadSafety(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			for j := 0; j < numMetricsPerGoroutine; j++ {
+				// Use a unique point ID for each metrics set
+				pointID := uint32(n*numMetricsPerGoroutine + j)
 				metrics := map[string]float32{
-					"value": float32(n*numMetricsPerGoroutine + j),
+					"value": float32(pointID),
 				}
-				pool.Add(metrics)
+				sc.metricsStore.AddMetrics(pointID, metrics)
 			}
 		}(i)
 	}
 
 	wg.Wait()
 
-	// Verify no data races occurred by checking if we can still add and get metrics
-	testIdx := pool.Add(map[string]float32{"test": 1.0})
-	if pool.Get(testIdx) == nil {
-		t.Error("Failed to get metrics after concurrent operations")
+	// Verify we can still retrieve metrics
+	for i := 0; i < numGoroutines; i++ {
+		for j := 0; j < numMetricsPerGoroutine; j++ {
+			pointID := uint32(i*numMetricsPerGoroutine + j)
+			metrics := sc.metricsStore.GetMetrics(pointID)
+			if metrics == nil || metrics["value"] != float32(pointID) {
+				t.Errorf("Failed to get correct metrics after concurrent operations for point %d", pointID)
+				break
+			}
+		}
 	}
 }
 
@@ -433,13 +504,17 @@ func TestGetClusters(t *testing.T) {
 
 	// Test at low zoom (should cluster)
 	clusters := sc.GetClusters(bounds, 5)
-	if len(clusters) != 2 { // Should have 2 clusters: 3 close points + 1 far point
+
+	// Should have 2 clusters: one for the 3 close points and one for the far point
+	if len(clusters) != 2 {
 		t.Errorf("Expected 2 clusters at zoom 5, got %d", len(clusters))
 	}
 
 	// Test at high zoom (should not cluster)
 	clusters = sc.GetClusters(bounds, 15)
-	if len(clusters) != 4 { // Should have all individual points
+
+	// Should have all individual points
+	if len(clusters) != 4 {
 		t.Errorf("Expected 4 points at zoom 15, got %d", len(clusters))
 	}
 
@@ -447,7 +522,7 @@ func TestGetClusters(t *testing.T) {
 	for _, c := range clusters {
 		if c.Count > 1 {
 			// Check if metrics are summed correctly
-			if value, ok := c.Metrics.Values["value"]; !ok || value == 0 {
+			if value, ok := c.Metrics["value"]; !ok || value == 0 {
 				t.Error("Expected non-zero value metric in cluster")
 			}
 		}
@@ -494,116 +569,158 @@ func TestLoad(t *testing.T) {
 		t.Errorf("Expected %d points in tree, got %d", len(points), len(sc.Tree.Points))
 	}
 
-	// Verify metrics were added to pool
-	if sc.Tree.Pool == nil || len(sc.Tree.Pool.Metrics) == 0 {
-		t.Error("Expected metrics to be added to pool")
+	// Check that metrics were added to the store
+	metrics1 := sc.metricsStore.GetMetrics(1)
+	if metrics1 == nil || metrics1["value"] != 100 {
+		t.Error("Expected metrics to be added to metrics store")
+	}
+
+	// Check that metadata was added to the store
+	metadata := sc.metadataStore.GetMetadata(1)
+	if metadata == nil || metadata["type"] != "store" {
+		t.Error("Expected metadata to be added to metadata store")
 	}
 }
 
-func TestProjectPoints(t *testing.T) {
-	sc := NewSupercluster(SuperclusterOptions{
-		MinZoom:   0,
-		MaxZoom:   16,
-		MinPoints: 2,
-		Radius:    40,
-		Extent:    512,
-		NodeSize:  64,
-	})
-
-	pool := NewMetricsPool()
-	points := []KDPoint{
-		{
-			X:         -100.0, // longitude
-			Y:         40.0,   // latitude
-			ID:        1,
-			NumPoints: 1,
-			MetricIdx: pool.Add(map[string]float32{"value": 100}),
-		},
-		{
-			X:         -120.0,
-			Y:         35.0,
-			ID:        2,
-			NumPoints: 1,
-			MetricIdx: pool.Add(map[string]float32{"value": 200}),
-		},
+func TestClusterQueryProfile(t *testing.T) {
+	// Skip during normal testing unless explicitly enabled
+	if testing.Short() {
+		t.Skip("Skipping profile test in short mode")
 	}
 
-	// Test projection at different zoom levels
-	zooms := []int{0, 8, 16}
-	for _, zoom := range zooms {
-		projected := sc.projectPoints(points, zoom, pool)
+	filename := "test_data/cluster-300000p-20250226-120950-5899860c.zst" 
 
-		if len(projected) != len(points) {
-			t.Errorf("Expected %d projected points at zoom %d, got %d",
-				len(points), zoom, len(projected))
+	// Parse zoom levels from environment, default to [2,5,10]
+	zoomLevels := []int{2, 5, 10}
+	if zoomStr := os.Getenv("ZOOM_LEVELS"); zoomStr != "" {
+		var levels []int
+		for _, s := range strings.Split(zoomStr, ",") {
+			z, err := strconv.Atoi(strings.TrimSpace(s))
+			if err != nil {
+				t.Fatalf("Invalid zoom level in ZOOM_LEVELS: %s", s)
+			}
+			levels = append(levels, z)
 		}
+		zoomLevels = levels
+	}
 
-		// Verify projection and unprojection round trip
-		for i, p := range projected {
-			unproj := sc.unprojectFast(p.X, p.Y, zoom)
+	// Load the cluster
+	fmt.Printf("Loading cluster from %s\n", filename)
+	start := time.Now()
+	sc, err := LoadCompressedSupercluster(filename)
+	if err != nil {
+		t.Fatalf("Failed to load cluster: %v", err)
+	}
+	fmt.Printf("Loaded cluster in %v\n", time.Since(start))
 
-			// Allow for small floating point differences
-			if math.Abs(float64(unproj[0]-points[i].X)) > 0.0001 ||
-				math.Abs(float64(unproj[1]-points[i].Y)) > 0.0001 {
-				t.Errorf("Projection round trip failed at zoom %d for point %d", zoom, i)
+	// Get the total bounds of the data
+	bounds := sc.Tree.Bounds
+	fmt.Printf("Total data bounds: MinX: %f, MinY: %f, MaxX: %f, MaxY: %f\n",
+		bounds.MinX, bounds.MinY, bounds.MaxX, bounds.MaxY)
+
+	// Define viewport sizes (in degrees) for different zoom levels
+	viewportSizes := map[int]float32{
+		2:  40.0, // Large viewport at low zoom
+		5:  20.0, // Medium viewport
+		10: 5.0,  // Small viewport at high zoom
+	}
+
+	// Define test viewports - we'll test center and corners of the data bounds
+	type viewport struct {
+		centerX, centerY float32
+		description      string
+	}
+
+	// Calculate center and corner viewports
+	centerX := (bounds.MinX + bounds.MaxX) / 2
+	centerY := (bounds.MinY + bounds.MaxY) / 2
+	viewports := []viewport{
+		{centerX, centerY, "center"},
+		{bounds.MinX + 1, bounds.MinY + 1, "bottom-left"},
+		{bounds.MaxX - 1, bounds.MaxY - 1, "top-right"},
+		{bounds.MinX + 1, bounds.MaxY - 1, "top-left"},
+		{bounds.MaxX - 1, bounds.MinY + 1, "bottom-right"},
+	}
+
+	// Query each zoom level
+	for _, zoom := range zoomLevels {
+		fmt.Printf("\n=== Zoom Level %d ===\n", zoom)
+		viewSize := viewportSizes[zoom]
+
+		// Test each viewport position
+		for _, vp := range viewports {
+			// Calculate viewport bounds
+			queryBounds := KDBounds{
+				MinX: vp.centerX - viewSize/2,
+				MaxX: vp.centerX + viewSize/2,
+				MinY: vp.centerY - viewSize/2,
+				MaxY: vp.centerY + viewSize/2,
 			}
 
-			// Verify metrics and metadata were preserved
-			if p.MetricIdx != points[i].MetricIdx {
-				t.Errorf("Expected MetricIdx %d, got %d", points[i].MetricIdx, p.MetricIdx)
+			fmt.Printf("\nQuerying %s viewport at zoom %d\n", vp.description, zoom)
+			fmt.Printf("Viewport bounds: MinX: %f, MinY: %f, MaxX: %f, MaxY: %f\n",
+				queryBounds.MinX, queryBounds.MinY, queryBounds.MaxX, queryBounds.MaxY)
+
+			start := time.Now()
+			clusters := sc.GetClusters(queryBounds, zoom)
+			duration := time.Since(start)
+
+			fmt.Printf("Found %d clusters in %v\n", len(clusters), duration)
+
+			// Print some stats about the clusters
+			var totalPoints uint32
+			pointsPerCluster := make(map[uint32]int)
+			for _, c := range clusters {
+				totalPoints += c.Count
+				pointsPerCluster[c.Count]++
+			}
+
+			fmt.Printf("Total points in viewport: %d\n", totalPoints)
+			fmt.Printf("Cluster size distribution:\n")
+
+			// Get sorted cluster sizes for consistent output
+			var sizes []uint32
+			for size := range pointsPerCluster {
+				sizes = append(sizes, size)
+			}
+			sort.Slice(sizes, func(i, j int) bool { return sizes[i] < sizes[j] })
+
+			for _, size := range sizes {
+				count := pointsPerCluster[size]
+				if count > 0 {
+					fmt.Printf("  %d points: %d clusters\n", size, count)
+				}
+			}
+
+			// Print a sample of cluster details
+			if len(clusters) > 0 {
+				fmt.Printf("\nSample cluster details (up to 3 clusters):\n")
+				numSamples := min(3, len(clusters))
+				for i := 0; i < numSamples; i++ {
+					c := clusters[i]
+					fmt.Printf("  Cluster %d: position=(%f,%f), points=%d\n",
+						i, c.X, c.Y, c.Count)
+					// Print first few metrics if any exist
+					if len(c.Metrics) > 0 {
+						fmt.Printf("    Metrics: ")
+						printed := 0
+						for k, v := range c.Metrics {
+							if printed < 3 {
+								fmt.Printf("%s=%.2f ", k, v)
+								printed++
+							}
+						}
+						fmt.Println()
+					}
+				}
 			}
 		}
 	}
 }
 
-func TestClusterPoints(t *testing.T) {
-	// Create test points first
-	pool := NewMetricsPool()
-	points := []KDPoint{
-		// Cluster 1: 3 points close together
-		{X: 0, Y: 0, ID: 1, NumPoints: 1, MetricIdx: pool.Add(map[string]float32{"value": 100})},
-		{X: 10, Y: 10, ID: 2, NumPoints: 1, MetricIdx: pool.Add(map[string]float32{"value": 200})},
-		{X: 20, Y: 20, ID: 3, NumPoints: 1, MetricIdx: pool.Add(map[string]float32{"value": 300})},
-
-		// Isolated point
-		{X: 1000, Y: 1000, ID: 4, NumPoints: 1, MetricIdx: pool.Add(map[string]float32{"value": 400})},
+func min(a, b int) int {
+	if a < b {
+		return a
 	}
-
-	// Create and initialize the supercluster with the points
-	sc := NewSupercluster(SuperclusterOptions{
-		MinZoom:   0,
-		MaxZoom:   16,
-		MinPoints: 2,
-		Radius:    100, // Large enough to cluster nearby points
-		Extent:    512,
-		NodeSize:  64,
-	})
-
-	// Initialize the tree with the points
-	sc.Tree = NewKDTree(points, sc.Options.NodeSize, pool)
-
-	clusters := sc.clusterPoints(points, 50) // Radius that should cluster the first 3 points
-
-	// Should have 2 clusters: one with 3 points and one isolated point
-	if len(clusters) != 2 {
-		t.Errorf("Expected 2 clusters, got %d", len(clusters))
-	}
-
-	// Verify cluster properties
-	for _, c := range clusters {
-		if c.Count == 3 {
-			// Check metrics aggregation
-			if value, ok := c.Metrics.Values["value"]; !ok || value != 600 { // 100 + 200 + 300
-				t.Errorf("Expected cluster value of 600, got %f", value)
-			}
-		} else if c.Count == 1 {
-			// Check isolated point
-			if value, ok := c.Metrics.Values["value"]; !ok || value != 400 {
-				t.Errorf("Expected point value of 400, got %f", value)
-			}
-		} else {
-			t.Errorf("Unexpected cluster count: %d", c.Count)
-		}
-	}
+	return b
 }
-

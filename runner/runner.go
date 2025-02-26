@@ -268,7 +268,7 @@ func (r *ClusterRunner) GetClusters(ctx context.Context, req *pb.GetClustersRequ
 			Count:     c.Count,
 			Id:        c.ID,
 			IsCluster: c.Count > 1,
-			Metrics:   c.Metrics.Values,
+			Metrics:   c.Metrics,
 		}
 	}
 
