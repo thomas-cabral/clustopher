@@ -923,8 +923,17 @@ func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
 
 	// Cluster points
 	clusterTime := time.Now()
-	if len(points) > 50000 {
-		clusters = append(clusters, sc.clusterPointsWithGrid(points, float32(sc.Options.Radius))...)
+	// Determine clustering method based on zoom level and point count
+	// Use grid-based clustering for:
+	// 1. Large datasets (>50000 points)
+	// 2. Medium datasets (>10000 points) at lower zoom levels (<MaxZoom/2)
+	// 3. Any dataset at very low zoom levels (<MaxZoom/4)
+	useGridClustering := len(points) > 50000 ||
+		(len(points) > 10000 && zoom < sc.Options.MaxZoom/2) ||
+		zoom < sc.Options.MaxZoom/4
+
+	if useGridClustering {
+		clusters = append(clusters, sc.clusterPointsWithGrid(points, float32(sc.Options.Radius), zoom)...)
 	} else {
 		clusters = append(clusters, sc.clusterPoints(points, float32(sc.Options.Radius))...)
 	}
@@ -1275,6 +1284,11 @@ func (sc *Supercluster) clusterPoints(points []KDPoint, radius float32) []Cluste
 	// Temp buffer for nearby points
 	nearby := make([]KDPoint, 0, 32)
 
+	// For medium-sized datasets, use parallel processing
+	if numPoints > 10000 && numPoints <= 50000 {
+		return sc.clusterPointsParallel(points, radius)
+	}
+
 	// Process each point
 	for i, p := range points {
 		if processed[p.ID] {
@@ -1287,6 +1301,19 @@ func (sc *Supercluster) clusterPoints(points []KDPoint, radius float32) []Cluste
 
 		// Find nearby points
 		radiusSquared := radius * radius
+
+		// Early optimization: if we've processed more than 75% of points and are
+		// creating lots of individual points, switch to grid-based clustering for the rest
+		if i > numPoints*3/4 && len(clusters) > numPoints/2 {
+			remainingPoints := make([]KDPoint, 0, numPoints-i)
+			for j := i; j < numPoints; j++ {
+				if !processed[points[j].ID] {
+					remainingPoints = append(remainingPoints, points[j])
+				}
+			}
+			gridClusters := sc.clusterPointsWithGrid(remainingPoints, radius)
+			return append(clusters, gridClusters...)
+		}
 
 		for j := i + 1; j < len(points); j++ {
 			other := points[j]
@@ -1332,8 +1359,132 @@ func (sc *Supercluster) clusterPoints(points []KDPoint, radius float32) []Cluste
 	return clusters
 }
 
+// clusterPointsParallel is a parallel version of clusterPoints for medium-sized datasets
+func (sc *Supercluster) clusterPointsParallel(points []KDPoint, radius float32) []ClusterNode {
+	numPoints := len(points)
+	numCPU := runtime.NumCPU()
+
+	// Limit number of goroutines for smaller datasets
+	if numPoints < 20000 {
+		numCPU = max(2, numCPU/2)
+	}
+
+	// Calculate points per CPU - add some overlap
+	pointsPerCPU := (numPoints + numCPU - 1) / numCPU
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var allClusters []ClusterNode
+
+	// Shared processed map
+	processed := make(map[uint32]bool, numPoints)
+
+	// Process points in parallel chunks
+	for i := 0; i < numCPU; i++ {
+		wg.Add(1)
+
+		go func(cpu int) {
+			defer wg.Done()
+
+			start := cpu * pointsPerCPU
+			end := min(start+pointsPerCPU+10, numPoints) // Add some overlap
+
+			if start >= numPoints {
+				return
+			}
+
+			nearby := make([]KDPoint, 0, 32)
+			localClusters := make([]ClusterNode, 0, pointsPerCPU/5)
+
+			for i := start; i < end; i++ {
+				p := points[i]
+
+				// Check if already processed by another goroutine
+				mu.Lock()
+				alreadyProcessed := processed[p.ID]
+				mu.Unlock()
+
+				if alreadyProcessed {
+					continue
+				}
+
+				// Reset nearby points buffer
+				nearby = nearby[:0]
+				nearby = append(nearby, p)
+
+				radiusSquared := radius * radius
+
+				// Find nearby points
+				for j := i + 1; j < numPoints; j++ {
+					other := points[j]
+
+					// Early exit if X distance is greater than radius
+					if other.X-p.X > radius {
+						break
+					}
+
+					mu.Lock()
+					alreadyProcessed = processed[other.ID]
+					mu.Unlock()
+
+					if alreadyProcessed {
+						continue
+					}
+
+					// Check distance
+					dx := other.X - p.X
+					dy := other.Y - p.Y
+					distSq := dx*dx + dy*dy
+
+					if distSq <= radiusSquared {
+						nearby = append(nearby, other)
+					}
+				}
+
+				// Create cluster if enough points
+				if len(nearby) >= sc.Options.MinPoints {
+					cluster := sc.createCluster(nearby)
+					localClusters = append(localClusters, cluster)
+
+					// Mark points as processed
+					mu.Lock()
+					for _, np := range nearby {
+						processed[np.ID] = true
+					}
+					mu.Unlock()
+				} else {
+					// First check if already processed by another goroutine
+					mu.Lock()
+					alreadyProcessed = processed[p.ID]
+					if !alreadyProcessed {
+						// Add as individual point
+						localClusters = append(localClusters, sc.createSinglePointCluster(p))
+						processed[p.ID] = true
+					}
+					mu.Unlock()
+				}
+			}
+
+			// Add local clusters to global result
+			if len(localClusters) > 0 {
+				mu.Lock()
+				allClusters = append(allClusters, localClusters...)
+				mu.Unlock()
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	if sc.Options.Log {
+		fmt.Printf("Created %d clusters from %d points (parallel)\n", len(allClusters), numPoints)
+	}
+
+	return allClusters
+}
+
 // Grid-based clustering for larger datasets
-func (sc *Supercluster) clusterPointsWithGrid(points []KDPoint, radius float32) []ClusterNode {
+func (sc *Supercluster) clusterPointsWithGrid(points []KDPoint, radius float32, zoom ...int) []ClusterNode {
 	if len(points) == 0 {
 		return nil
 	}
@@ -1341,6 +1492,27 @@ func (sc *Supercluster) clusterPointsWithGrid(points []KDPoint, radius float32) 
 	numPoints := len(points)
 	if sc.Options.Log {
 		fmt.Printf("Clustering %d points with grid (radius %f)\n", numPoints, radius)
+	}
+
+	// Get current zoom level if provided
+	currentZoom := -1
+	if len(zoom) > 0 {
+		currentZoom = zoom[0]
+	}
+
+	// Adjust grid cell size based on zoom level
+	// Use smaller cells at higher zoom levels to improve cluster accuracy
+	// Use larger cells at lower zoom levels for better performance
+	cellSizeFactor := 0.75 // Default factor
+	if currentZoom >= 0 {
+		// Adjust based on zoom
+		if currentZoom < sc.Options.MaxZoom/3 {
+			// At lower zoom levels, use larger cells for speed
+			cellSizeFactor = 0.9
+		} else if currentZoom > sc.Options.MaxZoom*2/3 {
+			// At higher zoom levels, use smaller cells for accuracy
+			cellSizeFactor = 0.6
+		}
 	}
 
 	// Pre-allocate result
@@ -1367,12 +1539,8 @@ func (sc *Supercluster) clusterPointsWithGrid(points []KDPoint, radius float32) 
 		}
 	}
 
-	// Set cell size slightly smaller than radius for good coverage
-	cellSize := radius * 0.75
-
-	// Determine grid dimensions with small padding
-	// gridWidth := int((maxX - minX) / cellSize) + 3
-	// gridHeight := int((maxY - minY) / cellSize) + 3
+	// Set cell size based on configured factor
+	cellSize := radius * float32(cellSizeFactor)
 
 	// Create grid
 	grid := make(map[[2]int][]int)
@@ -1384,6 +1552,14 @@ func (sc *Supercluster) clusterPointsWithGrid(points []KDPoint, radius float32) 
 
 		cell := [2]int{cellX, cellY}
 		grid[cell] = append(grid[cell], i)
+	}
+
+	// Optimized grid processing
+	// For smaller grids and higher zoom levels, use parallel processing
+	useParallel := numPoints > 20000 || (numPoints > 10000 && currentZoom > sc.Options.MaxZoom/2)
+
+	if useParallel {
+		return sc.processGridParallel(points, grid, radius, cellSize, minX, minY, processed)
 	}
 
 	// Reusable buffer for collecting nearby points
@@ -1403,13 +1579,19 @@ func (sc *Supercluster) clusterPointsWithGrid(points []KDPoint, radius float32) 
 		nearby = nearby[:0]
 		nearby = append(nearby, p)
 
-		// Check 3x3 surrounding cells
+		// Check surrounding cells - the search radius depends on zoom level
 		radiusSquared := radius * radius
 
-		for dy := -1; dy <= 1; dy++ {
+		// At lower zoom levels, check more surrounding cells to improve cluster accuracy
+		cellRange := 1
+		if currentZoom >= 0 && currentZoom < sc.Options.MaxZoom/3 {
+			cellRange = 2
+		}
+
+		for dy := -cellRange; dy <= cellRange; dy++ {
 			ny := cellY + dy
 
-			for dx := -1; dx <= 1; dx++ {
+			for dx := -cellRange; dx <= cellRange; dx++ {
 				nx := cellX + dx
 				cell := [2]int{nx, ny}
 
@@ -1455,6 +1637,150 @@ func (sc *Supercluster) clusterPointsWithGrid(points []KDPoint, radius float32) 
 		fmt.Printf("Created %d clusters from %d points using grid\n", len(clusters), numPoints)
 	}
 	return clusters
+}
+
+// processGridParallel processes a grid of points in parallel for better performance
+func (sc *Supercluster) processGridParallel(
+	points []KDPoint,
+	grid map[[2]int][]int,
+	radius float32,
+	cellSize float32,
+	minX, minY float32,
+	processed map[uint32]bool) []ClusterNode {
+
+	// Create a list of unprocessed points
+	var unprocessedPoints []KDPoint
+	for _, p := range points {
+		if !processed[p.ID] {
+			unprocessedPoints = append(unprocessedPoints, p)
+		}
+	}
+
+	numPoints := len(unprocessedPoints)
+	if numPoints == 0 {
+		return nil
+	}
+
+	// Calculate number of workers
+	numCPU := runtime.NumCPU()
+	if numPoints < 20000 {
+		numCPU = max(2, numCPU/2)
+	}
+
+	// Calculate points per worker
+	pointsPerCPU := (numPoints + numCPU - 1) / numCPU
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var allClusters []ClusterNode
+
+	// Create workers
+	for i := 0; i < numCPU; i++ {
+		wg.Add(1)
+
+		go func(cpu int) {
+			defer wg.Done()
+
+			start := cpu * pointsPerCPU
+			end := min(start+pointsPerCPU, numPoints)
+
+			if start >= numPoints {
+				return
+			}
+
+			nearby := make([]KDPoint, 0, 64)
+			localClusters := make([]ClusterNode, 0, pointsPerCPU/5)
+
+			for idx := start; idx < end; idx++ {
+				p := unprocessedPoints[idx]
+
+				// Check if already processed
+				mu.Lock()
+				if processed[p.ID] {
+					mu.Unlock()
+					continue
+				}
+				mu.Unlock()
+
+				// Calculate cell for this point
+				cellX := int((p.X-minX)/cellSize) + 1
+				cellY := int((p.Y-minY)/cellSize) + 1
+
+				// Reset nearby buffer
+				nearby = nearby[:0]
+				nearby = append(nearby, p)
+
+				radiusSquared := radius * radius
+
+				// Check surrounding cells
+				for dy := -1; dy <= 1; dy++ {
+					ny := cellY + dy
+
+					for dx := -1; dx <= 1; dx++ {
+						nx := cellX + dx
+						cell := [2]int{nx, ny}
+
+						// Check points in this cell
+						if cellIndices, ok := grid[cell]; ok {
+							for _, pointIdx := range cellIndices {
+								other := points[pointIdx]
+
+								mu.Lock()
+								alreadyProcessed := processed[other.ID] || other.ID == p.ID
+								mu.Unlock()
+
+								if alreadyProcessed {
+									continue
+								}
+
+								// Distance check
+								dx := other.X - p.X
+								dy := other.Y - p.Y
+								distSq := dx*dx + dy*dy
+
+								if distSq <= radiusSquared {
+									nearby = append(nearby, other)
+								}
+							}
+						}
+					}
+				}
+
+				// Create cluster if enough points
+				if len(nearby) >= sc.Options.MinPoints {
+					cluster := sc.createCluster(nearby)
+					localClusters = append(localClusters, cluster)
+
+					// Mark as processed
+					mu.Lock()
+					for _, np := range nearby {
+						processed[np.ID] = true
+					}
+					mu.Unlock()
+				} else {
+					// Check if processed by another goroutine
+					mu.Lock()
+					alreadyProcessed := processed[p.ID]
+					if !alreadyProcessed {
+						localClusters = append(localClusters, sc.createSinglePointCluster(p))
+						processed[p.ID] = true
+					}
+					mu.Unlock()
+				}
+			}
+
+			// Add local clusters to result
+			if len(localClusters) > 0 {
+				mu.Lock()
+				allClusters = append(allClusters, localClusters...)
+				mu.Unlock()
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	return allClusters
 }
 
 // createCluster creates a cluster from points
