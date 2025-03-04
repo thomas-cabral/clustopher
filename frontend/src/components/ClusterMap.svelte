@@ -60,32 +60,44 @@
 
         const clusterChanged = previousClusterId !== currentClusterId;
         console.log('Cluster change detected:', { previous: previousClusterId, current: currentClusterId, changed: clusterChanged });
-        previousClusterId = currentClusterId;
-
-        // Wait for map source to be ready
-        map.once('sourcedata', () => {
-            // Clear existing data when clusterId changes
-            if (clusterChanged) {
-                console.log('Clearing map data');
-                metadata = null;
-                const source = map.getSource('clusters') as mapboxgl.GeoJSONSource;
-                if (source) {
-                    source.setData({
-                        type: 'FeatureCollection',
-                        features: []
-                    });
-                }
+        
+        // Immediately clear the map when cluster changes, don't wait for sourcedata event
+        if (clusterChanged) {
+            console.log('Immediately clearing map data');
+            isLoading = true;
+            metadata = null;
+            const source = map.getSource('clusters') as mapboxgl.GeoJSONSource;
+            if (source) {
+                source.setData({
+                    type: 'FeatureCollection',
+                    features: []
+                });
             }
+            
+            // Update the previous cluster ID
+            previousClusterId = currentClusterId;
+            
+            // If no cluster is selected, just stop loading
+            if (!currentClusterId) {
+                isLoading = false;
+                return;
+            }
+        }
 
+        // Wait for map source to be ready before fetching new data
+        map.once('sourcedata', () => {
             // Fetch new data if we have a clusterId and either:
             // 1. The clusterId changed, or
             // 2. The reloadTrigger was incremented
-            if (currentClusterId && (clusterChanged || currentReloadTrigger)) {
+            if (currentClusterId && (clusterChanged || currentReloadTrigger > 0)) {
                 console.log('Fetching new cluster data');
                 const bounds = map.getBounds();
                 if (bounds) {
                     fetchClusters(bounds, map.getZoom());
                 }
+            } else {
+                // Ensure loading state is cleared if we're not fetching
+                isLoading = false;
             }
         });
     });
@@ -113,6 +125,7 @@
     async function fetchClusters(bounds: mapboxgl.LngLatBounds, zoom: number) {
         if (!clusterId) {
             console.log('No clusterId, skipping fetch');
+            isLoading = false;
             return;
         }
         
@@ -373,8 +386,10 @@
           popup.remove();
         });
   
-        // Initial fetch
-        fetchClusters(map.getBounds() as mapboxgl.LngLatBounds, map.getZoom());
+        // Initial fetch if we have a clusterId
+        if (clusterId) {
+            fetchClusters(map.getBounds() as mapboxgl.LngLatBounds, map.getZoom());
+        }
       });
   
       // Click handler for clusters
@@ -406,7 +421,10 @@
             west: bounds?.getWest() || 0,
             zoom: map.getZoom()
         });
-        fetchClusters(bounds as mapboxgl.LngLatBounds, map.getZoom());
+        
+        if (clusterId) {
+            fetchClusters(bounds as mapboxgl.LngLatBounds, map.getZoom());
+        }
       });
     });
   
@@ -485,14 +503,17 @@
                                 {:else}
                                     <!-- Handle distribution -->
                                     <div class="distribution-section">
-                                        {#each Object.entries(value) as [subKey, freq]}
-                                            {#if typeof freq === 'number'}
-                                                <div class="distribution-item">
-                                                    <span>{subKey}</span>
-                                                    <span>{freq.toFixed(1)}%</span>
-                                                </div>
-                                            {/if}
-                                        {/each}
+                                        <h5>{key.charAt(0).toUpperCase() + key.slice(1)}</h5>
+                                        <div class="distribution-list">
+                                            {#each Object.entries(value) as [subKey, freq]}
+                                                {#if typeof freq === 'number'}
+                                                    <div class="distribution-item">
+                                                        <span>{subKey}</span>
+                                                        <span>{freq.toFixed(1)}%</span>
+                                                    </div>
+                                                {/if}
+                                            {/each}
+                                        </div>
                                     </div>
                                 {/if}
                             </div>
@@ -627,9 +648,8 @@
     }
 
     .metadata-item {
-        display: flex;
-        justify-content: space-between;
         font-size: 13px;
+        margin-bottom: 8px;
     }
 
     .metadata-item label {

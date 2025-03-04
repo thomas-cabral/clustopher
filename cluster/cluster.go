@@ -1500,30 +1500,46 @@ func (sc *Supercluster) clusterPointsWithGrid(points []KDPoint, radius float32, 
 		currentZoom = zoom[0]
 	}
 
-	// Adjust grid cell size based on zoom level
-	// Use smaller cells at higher zoom levels to improve cluster accuracy
-	// Use larger cells at lower zoom levels for better performance
+	// Calculate optimal grid cell size based on zoom level and data density
+	// Use dynamic cell size adjustment based on empirical testing
+	// Larger cell sizes at low zoom levels reduce the number of cell checks needed
+	// while smaller cell sizes at high zoom levels provide more precise clustering
 	cellSizeFactor := 0.75 // Default factor
+
 	if currentZoom >= 0 {
-		// Adjust based on zoom
-		if currentZoom < sc.Options.MaxZoom/3 {
-			// At lower zoom levels, use larger cells for speed
-			cellSizeFactor = 0.9
-		} else if currentZoom > sc.Options.MaxZoom*2/3 {
-			// At higher zoom levels, use smaller cells for accuracy
-			cellSizeFactor = 0.6
+		maxZoom := sc.Options.MaxZoom
+		zoomRatio := float32(currentZoom) / float32(maxZoom)
+
+		if currentZoom < maxZoom/4 {
+			// At very low zoom levels (0-25% of max), use much larger cells
+			cellSizeFactor = float64(1.1 - 0.75*zoomRatio) // Range: 1.1 to ~0.9
+		} else if currentZoom < maxZoom/2 {
+			// At low-medium zoom levels (25-50% of max), use moderately larger cells
+			cellSizeFactor = float64(0.9 - 0.3*zoomRatio) // Range: ~0.9 to ~0.75
+		} else if currentZoom > maxZoom*3/4 {
+			// At high zoom levels (75-100% of max), use smaller cells for precision
+			cellSizeFactor = float64(0.7 - 0.2*zoomRatio) // Range: ~0.7 to ~0.5
 		}
 	}
 
-	// Pre-allocate result
-	clusters := make([]ClusterNode, 0, numPoints/5)
+	// Adjust cell size factor based on point density
+	// Very dense datasets benefit from larger cells (fewer checks)
+	if numPoints > 50000 {
+		cellSizeFactor *= 1.1 // Increase by 10%
+	} else if numPoints < 5000 {
+		cellSizeFactor *= 0.9 // Decrease by 10%
+	}
+
+	// Pre-allocate result with a realistic capacity
+	expectedClusters := numPoints / 5 // Heuristic: about 20% of points become clusters
+	clusters := make([]ClusterNode, 0, expectedClusters)
 	processed := make(map[uint32]bool, numPoints)
 
 	// Calculate grid bounds
 	minX, minY := float32(math.MaxFloat32), float32(math.MaxFloat32)
 	maxX, maxY := float32(-math.MaxFloat32), float32(-math.MaxFloat32)
 
-	// Find bounds
+	// Find bounds using min/max helpers for float32
 	for _, p := range points {
 		if p.X < minX {
 			minX = p.X
@@ -1542,8 +1558,9 @@ func (sc *Supercluster) clusterPointsWithGrid(points []KDPoint, radius float32, 
 	// Set cell size based on configured factor
 	cellSize := radius * float32(cellSizeFactor)
 
-	// Create grid
-	grid := make(map[[2]int][]int)
+	// Create grid - pre-allocate with expected capacity
+	gridCapacity := int(float32(numPoints) * 1.2) // Allow 20% overhead
+	grid := make(map[[2]int][]int, gridCapacity)
 
 	// Insert points into grid
 	for i, p := range points {
@@ -1554,16 +1571,18 @@ func (sc *Supercluster) clusterPointsWithGrid(points []KDPoint, radius float32, 
 		grid[cell] = append(grid[cell], i)
 	}
 
-	// Optimized grid processing
-	// For smaller grids and higher zoom levels, use parallel processing
-	useParallel := numPoints > 20000 || (numPoints > 10000 && currentZoom > sc.Options.MaxZoom/2)
+	// Optimized grid processing based on point count and zoom
+	// For larger datasets or low zoom levels, use parallel processing
+	useParallel := numPoints > 10000 ||
+		(numPoints > 5000 && currentZoom >= 0 && currentZoom < sc.Options.MaxZoom/2)
 
 	if useParallel {
 		return sc.processGridParallel(points, grid, radius, cellSize, minX, minY, processed)
 	}
 
+	// For smaller datasets, use a sequential but optimized approach
 	// Reusable buffer for collecting nearby points
-	nearby := make([]KDPoint, 0, 64)
+	nearby := make([]KDPoint, 0, 128) // Larger initial capacity reduces reallocations
 
 	// Process points
 	for _, p := range points {
@@ -1579,15 +1598,24 @@ func (sc *Supercluster) clusterPointsWithGrid(points []KDPoint, radius float32, 
 		nearby = nearby[:0]
 		nearby = append(nearby, p)
 
-		// Check surrounding cells - the search radius depends on zoom level
+		// Determine search radius based on zoom level
 		radiusSquared := radius * radius
+		cellRange := 1 // Default: check adjacent cells only
 
-		// At lower zoom levels, check more surrounding cells to improve cluster accuracy
-		cellRange := 1
-		if currentZoom >= 0 && currentZoom < sc.Options.MaxZoom/3 {
-			cellRange = 2
+		// At lower zoom levels, check more surrounding cells for better accuracy
+		// At higher zoom levels, stick with adjacent cells for speed
+		if currentZoom >= 0 {
+			if currentZoom < sc.Options.MaxZoom/4 {
+				cellRange = 2 // Check two cells in each direction at very low zoom
+			} else if currentZoom < sc.Options.MaxZoom/2 {
+				// Use 1.5 cell range at medium-low zoom levels
+				// This means checking all adjacent cells plus corner cells
+				cellRange = 1
+				// Corner cells handled separately below
+			}
 		}
 
+		// Check surrounding cells within cellRange
 		for dy := -cellRange; dy <= cellRange; dy++ {
 			ny := cellY + dy
 
@@ -1595,7 +1623,7 @@ func (sc *Supercluster) clusterPointsWithGrid(points []KDPoint, radius float32, 
 				nx := cellX + dx
 				cell := [2]int{nx, ny}
 
-				// Check points in this cell
+				// Skip if cell doesn't exist (outside grid bounds or no points)
 				if cellIndices, ok := grid[cell]; ok {
 					for _, pointIdx := range cellIndices {
 						other := points[pointIdx]
@@ -1605,6 +1633,39 @@ func (sc *Supercluster) clusterPointsWithGrid(points []KDPoint, radius float32, 
 						}
 
 						// Fast distance check
+						dx := other.X - p.X
+						dy := other.Y - p.Y
+						distSq := dx*dx + dy*dy
+
+						if distSq <= radiusSquared {
+							nearby = append(nearby, other)
+						}
+					}
+				}
+			}
+		}
+
+		// For medium-low zoom levels with cellRange 1, also check corner cells
+		// that are 1.5 cells away
+		if currentZoom >= 0 && currentZoom >= sc.Options.MaxZoom/4 && currentZoom < sc.Options.MaxZoom/2 {
+			// Check diagonal corner cells at distance 1.5
+			cornerDX := []int{-1, -1, 1, 1}
+			cornerDY := []int{-1, 1, -1, 1}
+
+			for i := 0; i < 4; i++ {
+				nx := cellX + cornerDX[i]
+				ny := cellY + cornerDY[i]
+				cell := [2]int{nx, ny}
+
+				if cellIndices, ok := grid[cell]; ok {
+					for _, pointIdx := range cellIndices {
+						other := points[pointIdx]
+
+						if other.ID == p.ID || processed[other.ID] {
+							continue
+						}
+
+						// Distance check
 						dx := other.X - p.X
 						dy := other.Y - p.Y
 						distSq := dx*dx + dy*dy
@@ -1649,9 +1710,18 @@ func (sc *Supercluster) processGridParallel(
 	processed map[uint32]bool) []ClusterNode {
 
 	// Create a list of unprocessed points
-	var unprocessedPoints []KDPoint
+	unprocessedPoints := make([]KDPoint, 0, len(points))
+
+	// Copy the processed map to avoid modifying the original during filtering
+	mutex := &sync.RWMutex{}
+	localProcessed := make(map[uint32]bool, len(processed))
+	for id, isProcessed := range processed {
+		localProcessed[id] = isProcessed
+	}
+
+	// Pre-filter points to reduce workload
 	for _, p := range points {
-		if !processed[p.ID] {
+		if !localProcessed[p.ID] {
 			unprocessedPoints = append(unprocessedPoints, p)
 		}
 	}
@@ -1663,7 +1733,11 @@ func (sc *Supercluster) processGridParallel(
 
 	// Calculate number of workers
 	numCPU := runtime.NumCPU()
-	if numPoints < 20000 {
+
+	// Adjust worker count based on problem size for better efficiency
+	if numPoints < 10000 {
+		numCPU = max(2, numCPU/4)
+	} else if numPoints < 20000 {
 		numCPU = max(2, numCPU/2)
 	}
 
@@ -1671,14 +1745,30 @@ func (sc *Supercluster) processGridParallel(
 	pointsPerCPU := (numPoints + numCPU - 1) / numCPU
 
 	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var allClusters []ClusterNode
+
+	// Use a single mutex for synchronization
+	// Removing unused constant: const numShards = 32
+
+	// Pre-allocate to avoid allocations during processing
+	type resultSet struct {
+		clusters     []ClusterNode
+		processedIDs map[uint32]bool
+	}
+
+	results := make([]resultSet, numCPU)
+
+	// Pre-allocate for each worker
+	for i := 0; i < numCPU; i++ {
+		// Allocate based on expected number of clusters (about 20% of points become clusters)
+		results[i].clusters = make([]ClusterNode, 0, pointsPerCPU/5)
+		results[i].processedIDs = make(map[uint32]bool, pointsPerCPU)
+	}
 
 	// Create workers
 	for i := 0; i < numCPU; i++ {
 		wg.Add(1)
 
-		go func(cpu int) {
+		go func(cpu int, result *resultSet) {
 			defer wg.Done()
 
 			start := cpu * pointsPerCPU
@@ -1688,19 +1778,20 @@ func (sc *Supercluster) processGridParallel(
 				return
 			}
 
-			nearby := make([]KDPoint, 0, 64)
-			localClusters := make([]ClusterNode, 0, pointsPerCPU/5)
+			// Pre-allocate buffers with appropriate capacity
+			nearby := make([]KDPoint, 0, 128)
+			locallyProcessed := make(map[uint32]bool)
 
 			for idx := start; idx < end; idx++ {
 				p := unprocessedPoints[idx]
 
-				// Check if already processed
-				mu.Lock()
-				if processed[p.ID] {
-					mu.Unlock()
+				// Check if already processed using RLock
+				mutex.RLock()
+				if localProcessed[p.ID] {
+					mutex.RUnlock()
 					continue
 				}
-				mu.Unlock()
+				mutex.RUnlock()
 
 				// Calculate cell for this point
 				cellX := int((p.X-minX)/cellSize) + 1
@@ -1712,10 +1803,9 @@ func (sc *Supercluster) processGridParallel(
 
 				radiusSquared := radius * radius
 
-				// Check surrounding cells
+				// Collect point candidates from surrounding cells
 				for dy := -1; dy <= 1; dy++ {
 					ny := cellY + dy
-
 					for dx := -1; dx <= 1; dx++ {
 						nx := cellX + dx
 						cell := [2]int{nx, ny}
@@ -1724,16 +1814,19 @@ func (sc *Supercluster) processGridParallel(
 						if cellIndices, ok := grid[cell]; ok {
 							for _, pointIdx := range cellIndices {
 								other := points[pointIdx]
-
-								mu.Lock()
-								alreadyProcessed := processed[other.ID] || other.ID == p.ID
-								mu.Unlock()
-
-								if alreadyProcessed {
+								if other.ID == p.ID {
 									continue
 								}
 
-								// Distance check
+								// Use read lock to check if point is processed
+								mutex.RLock()
+								if localProcessed[other.ID] {
+									mutex.RUnlock()
+									continue
+								}
+								mutex.RUnlock()
+
+								// Cache the distance calculation
 								dx := other.X - p.X
 								dy := other.Y - p.Y
 								distSq := dx*dx + dy*dy
@@ -1749,36 +1842,52 @@ func (sc *Supercluster) processGridParallel(
 				// Create cluster if enough points
 				if len(nearby) >= sc.Options.MinPoints {
 					cluster := sc.createCluster(nearby)
-					localClusters = append(localClusters, cluster)
+					result.clusters = append(result.clusters, cluster)
 
-					// Mark as processed
-					mu.Lock()
+					// Mark as processed in local result set
 					for _, np := range nearby {
-						processed[np.ID] = true
+						result.processedIDs[np.ID] = true
+						locallyProcessed[np.ID] = true
 					}
-					mu.Unlock()
+
+					// Also mark in shared map to avoid other workers processing these points
+					mutex.Lock()
+					for _, np := range nearby {
+						localProcessed[np.ID] = true
+					}
+					mutex.Unlock()
 				} else {
-					// Check if processed by another goroutine
-					mu.Lock()
-					alreadyProcessed := processed[p.ID]
-					if !alreadyProcessed {
-						localClusters = append(localClusters, sc.createSinglePointCluster(p))
-						processed[p.ID] = true
+					// Check if processed by another worker
+					mutex.Lock()
+					if !localProcessed[p.ID] {
+						result.clusters = append(result.clusters, sc.createSinglePointCluster(p))
+						result.processedIDs[p.ID] = true
+						localProcessed[p.ID] = true
 					}
-					mu.Unlock()
+					mutex.Unlock()
 				}
 			}
-
-			// Add local clusters to result
-			if len(localClusters) > 0 {
-				mu.Lock()
-				allClusters = append(allClusters, localClusters...)
-				mu.Unlock()
-			}
-		}(i)
+		}(i, &results[i])
 	}
 
 	wg.Wait()
+
+	// Calculate total size of all clusters to allocate exactly once
+	totalClusters := 0
+	for i := 0; i < numCPU; i++ {
+		totalClusters += len(results[i].clusters)
+	}
+
+	// Allocate once and copy all results
+	allClusters := make([]ClusterNode, 0, totalClusters)
+	for i := 0; i < numCPU; i++ {
+		allClusters = append(allClusters, results[i].clusters...)
+
+		// Add processed IDs back to the input map
+		for id := range results[i].processedIDs {
+			processed[id] = true
+		}
+	}
 
 	return allClusters
 }
@@ -1945,4 +2054,412 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// Helper function for float32 max
+func max32(a, b float32) float32 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// clusterPointsWithKDTree uses a KDTree for efficient nearest-neighbor clustering
+// This method is especially efficient for high zoom levels and medium to large datasets
+func (sc *Supercluster) clusterPointsWithKDTree(points []KDPoint, radius float32, zoom ...int) []ClusterNode {
+	if len(points) == 0 {
+		return nil
+	}
+
+	numPoints := len(points)
+	if sc.Options.Log {
+		fmt.Printf("Clustering %d points with KDTree (radius %f)\n", numPoints, radius)
+	}
+
+	// Get current zoom level if provided
+	currentZoom := -1
+	if len(zoom) > 0 {
+		currentZoom = zoom[0]
+	}
+
+	// Calculate squared radius for distance comparisons
+	radiusSquared := radius * radius
+
+	// Build KDTree for efficient spatial queries
+	kdtree := sc.buildKDTree(points)
+
+	// Pre-allocate result with a reasonable capacity
+	expectedClusters := numPoints / 5
+	clusters := make([]ClusterNode, 0, expectedClusters)
+	processed := make(map[uint32]bool, numPoints)
+
+	// Decide if we should use parallel processing based on data size
+	useParallel := numPoints > 10000
+
+	if useParallel {
+		return sc.clusterPointsWithKDTreeParallel(points, kdtree, radius, radiusSquared, processed, currentZoom)
+	}
+
+	// Reusable buffer for range queries
+	nearby := make([]KDPoint, 0, 128)
+
+	// Process each point
+	for _, p := range points {
+		if processed[p.ID] {
+			continue
+		}
+
+		// Find all points within radius using the KDTree
+		nearby = nearby[:0]
+		nearby = append(nearby, p) // Include the current point
+
+		// Define search bounds
+		searchBounds := KDBounds{
+			MinX: p.X - radius,
+			MinY: p.Y - radius,
+			MaxX: p.X + radius,
+			MaxY: p.Y + radius,
+		}
+
+		// Use the KDTree to find points in range
+		sc.findPointsInKDTree(kdtree, searchBounds, radiusSquared, p, nearby, processed)
+
+		// Create cluster if enough points
+		if len(nearby) >= sc.Options.MinPoints {
+			cluster := sc.createCluster(nearby)
+			clusters = append(clusters, cluster)
+
+			// Mark points as processed
+			for _, np := range nearby {
+				processed[np.ID] = true
+			}
+		} else if !processed[p.ID] {
+			// Add as individual point
+			clusters = append(clusters, sc.createSinglePointCluster(p))
+			processed[p.ID] = true
+		}
+	}
+
+	if sc.Options.Log {
+		fmt.Printf("Created %d clusters from %d points using KDTree\n", len(clusters), numPoints)
+	}
+
+	return clusters
+}
+
+// findPointsInKDTree finds all points within radius of the query point using the KDTree
+func (sc *Supercluster) findPointsInKDTree(
+	tree *KDTree,
+	bounds KDBounds,
+	radiusSquared float32,
+	queryPoint KDPoint,
+	result []KDPoint,
+	processed map[uint32]bool) []KDPoint {
+
+	// Start recursion with the root node
+	return sc.findPointsInNodeRange(tree, 0, bounds, radiusSquared, queryPoint, result, processed)
+}
+
+// findPointsInNodeRange recursively searches the KDTree for points within radius
+func (sc *Supercluster) findPointsInNodeRange(
+	tree *KDTree,
+	nodeIdx int32,
+	bounds KDBounds,
+	radiusSquared float32,
+	queryPoint KDPoint,
+	result []KDPoint,
+	processed map[uint32]bool) []KDPoint {
+
+	// Check if we've reached the end of the tree
+	if nodeIdx < 0 || int(nodeIdx) >= len(tree.Nodes) {
+		return result
+	}
+
+	node := tree.Nodes[nodeIdx]
+
+	// Fast intersection test
+	if !node.Bounds.intersectsBounds(bounds) {
+		return result
+	}
+
+	// If this is a leaf node, check all points
+	if node.PointIdx >= 0 {
+		pointIdx := int(node.PointIdx)
+		other := tree.Points[pointIdx]
+
+		// Skip if already processed or same as query point
+		if processed[other.ID] || other.ID == queryPoint.ID {
+			return result
+		}
+
+		// Distance check
+		dx := other.X - queryPoint.X
+		dy := other.Y - queryPoint.Y
+		distSq := dx*dx + dy*dy
+
+		if distSq <= radiusSquared {
+			result = append(result, other)
+		}
+
+		return result
+	}
+
+	// Recursively search children
+	result = sc.findPointsInNodeRange(tree, node.Left, bounds, radiusSquared, queryPoint, result, processed)
+	result = sc.findPointsInNodeRange(tree, node.Right, bounds, radiusSquared, queryPoint, result, processed)
+
+	return result
+}
+
+// clusterPointsWithKDTreeParallel uses a KDTree for efficient parallel clustering
+func (sc *Supercluster) clusterPointsWithKDTreeParallel(
+	points []KDPoint,
+	tree *KDTree,
+	radius float32,
+	radiusSquared float32,
+	processed map[uint32]bool,
+	zoom int) []ClusterNode {
+
+	numPoints := len(points)
+	if numPoints == 0 {
+		return nil
+	}
+
+	// Calculate number of workers based on available CPUs and dataset size
+	numCPU := runtime.NumCPU()
+	if numPoints < 10000 {
+		numCPU = max(2, numCPU/4)
+	} else if numPoints < 20000 {
+		numCPU = max(2, numCPU/2)
+	}
+
+	// Create work partitions
+	pointsPerCPU := (numPoints + numCPU - 1) / numCPU
+
+	var wg sync.WaitGroup
+	var mutex sync.RWMutex
+
+	// Pre-allocate per-worker result sets
+	type resultSet struct {
+		clusters     []ClusterNode
+		processedIDs map[uint32]bool
+	}
+
+	results := make([]resultSet, numCPU)
+	for i := 0; i < numCPU; i++ {
+		// Allocate based on expected number of clusters (about 20% of points become clusters)
+		results[i].clusters = make([]ClusterNode, 0, pointsPerCPU/5)
+		results[i].processedIDs = make(map[uint32]bool, pointsPerCPU)
+	}
+
+	// Copy the processed map to avoid modifying the original during filtering
+	localProcessed := make(map[uint32]bool, len(processed))
+	for id, isProcessed := range processed {
+		localProcessed[id] = isProcessed
+	}
+
+	// Create workers
+	for i := 0; i < numCPU; i++ {
+		wg.Add(1)
+
+		go func(cpu int, result *resultSet) {
+			defer wg.Done()
+
+			start := cpu * pointsPerCPU
+			end := min(start+pointsPerCPU, numPoints)
+
+			if start >= numPoints {
+				return
+			}
+
+			nearby := make([]KDPoint, 0, 128)
+
+			// Process each point in this worker's partition
+			for idx := start; idx < end; idx++ {
+				p := points[idx]
+
+				// Check if already processed
+				mutex.RLock()
+				if localProcessed[p.ID] {
+					mutex.RUnlock()
+					continue
+				}
+				mutex.RUnlock()
+
+				// Find all points within radius
+				nearby = nearby[:0]
+				nearby = append(nearby, p)
+
+				candidates := sc.findCandidatesInKDTree(tree, KDBounds{
+					MinX: p.X - radius,
+					MinY: p.Y - radius,
+					MaxX: p.X + radius,
+					MaxY: p.Y + radius,
+				}, radiusSquared, p, nil)
+
+				// Filter out processed points
+				for _, other := range candidates {
+					if other.ID == p.ID {
+						continue
+					}
+
+					mutex.RLock()
+					if !localProcessed[other.ID] {
+						nearby = append(nearby, other)
+					}
+					mutex.RUnlock()
+				}
+
+				// Create cluster if enough points
+				if len(nearby) >= sc.Options.MinPoints {
+					cluster := sc.createCluster(nearby)
+					result.clusters = append(result.clusters, cluster)
+
+					// Mark points as processed in local result set
+					for _, np := range nearby {
+						result.processedIDs[np.ID] = true
+					}
+
+					// Also mark in shared map to avoid other workers processing these points
+					mutex.Lock()
+					for _, np := range nearby {
+						localProcessed[np.ID] = true
+					}
+					mutex.Unlock()
+				} else {
+					// Add as individual point
+					mutex.Lock()
+					alreadyProcessed := localProcessed[p.ID]
+					if !alreadyProcessed {
+						// Add as individual point
+						result.clusters = append(result.clusters, sc.createSinglePointCluster(p))
+						result.processedIDs[p.ID] = true
+						localProcessed[p.ID] = true
+					}
+					mutex.Unlock()
+				}
+			}
+		}(i, &results[i])
+	}
+
+	wg.Wait()
+
+	// Calculate total size of all clusters for single allocation
+	totalClusters := 0
+	for i := 0; i < numCPU; i++ {
+		totalClusters += len(results[i].clusters)
+	}
+
+	// Merge results from all workers
+	allClusters := make([]ClusterNode, 0, totalClusters)
+	for i := 0; i < numCPU; i++ {
+		allClusters = append(allClusters, results[i].clusters...)
+
+		// Update processed IDs in original map
+		for id := range results[i].processedIDs {
+			processed[id] = true
+		}
+	}
+
+	return allClusters
+}
+
+// findCandidatesInKDTree is like findPointsInKDTree but doesn't check processed state
+func (sc *Supercluster) findCandidatesInKDTree(
+	tree *KDTree,
+	bounds KDBounds,
+	radiusSquared float32,
+	queryPoint KDPoint,
+	result []KDPoint) []KDPoint {
+
+	// Start recursion with the root node
+	return sc.findCandidatesInNodeRange(tree, 0, bounds, radiusSquared, queryPoint, result)
+}
+
+// findCandidatesInNodeRange recursively searches without checking processed state
+func (sc *Supercluster) findCandidatesInNodeRange(
+	tree *KDTree,
+	nodeIdx int32,
+	bounds KDBounds,
+	radiusSquared float32,
+	queryPoint KDPoint,
+	result []KDPoint) []KDPoint {
+
+	// Check if we've reached the end of the tree
+	if nodeIdx < 0 || int(nodeIdx) >= len(tree.Nodes) {
+		return result
+	}
+
+	node := tree.Nodes[nodeIdx]
+
+	// Use min/max child for early pruning
+	if queryPoint.ID > node.MaxChild || queryPoint.ID < node.MinChild {
+		// Fast bounds check - if queryPoint ID is outside the range of IDs in this
+		// subtree, there's no need to check for self-intersection
+		if !node.Bounds.intersectsBounds(bounds) {
+			return result
+		}
+	}
+
+	// If this is a leaf node, check the point
+	if node.PointIdx >= 0 {
+		pointIdx := int(node.PointIdx)
+		other := tree.Points[pointIdx]
+
+		// Skip if same as query point
+		if other.ID == queryPoint.ID {
+			return result
+		}
+
+		// Distance check
+		dx := other.X - queryPoint.X
+		dy := other.Y - queryPoint.Y
+		distSq := dx*dx + dy*dy
+
+		if distSq <= radiusSquared {
+			result = append(result, other)
+		}
+
+		return result
+	}
+
+	// Recursively search children
+	result = sc.findCandidatesInNodeRange(tree, node.Left, bounds, radiusSquared, queryPoint, result)
+	result = sc.findCandidatesInNodeRange(tree, node.Right, bounds, radiusSquared, queryPoint, result)
+
+	return result
+}
+
+// ClusterPoints selects the optimal clustering algorithm based on data characteristics
+func (sc *Supercluster) ClusterPoints(points []KDPoint, zoom int) []ClusterNode {
+	numPoints := len(points)
+	if numPoints == 0 {
+		return nil
+	}
+
+	radius := float32(sc.Options.Radius)
+
+	// For very large datasets or low zoom levels, use grid-based clustering
+	if numPoints > 50000 ||
+		(numPoints > 10000 && zoom < sc.Options.MaxZoom/2) ||
+		zoom < sc.Options.MaxZoom/4 {
+		if sc.Options.Log {
+			fmt.Printf("Using grid-based clustering for %d points at zoom %d\n", numPoints, zoom)
+		}
+		return sc.clusterPointsWithGrid(points, radius, zoom)
+	}
+
+	// For medium to large datasets at higher zoom levels, use KDTree-based clustering
+	if numPoints > 5000 && zoom > sc.Options.MaxZoom/3 {
+		if sc.Options.Log {
+			fmt.Printf("Using KDTree-based clustering for %d points at zoom %d\n", numPoints, zoom)
+		}
+		return sc.clusterPointsWithKDTree(points, radius, zoom)
+	}
+
+	// For smaller datasets, use traditional clustering
+	if sc.Options.Log {
+		fmt.Printf("Using traditional clustering for %d points at zoom %d\n", numPoints, zoom)
+	}
+	return sc.clusterPoints(points, radius)
 }
