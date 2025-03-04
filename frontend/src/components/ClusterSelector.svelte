@@ -23,6 +23,7 @@
         fileSize: number;
     }> = $state([]);
     let loading = $state(false);
+    let selectingCluster = $state(false);
     let newClusterPoints = $state("300000");
     let error = $state('');
     let loadedClusterInfo: ClusterInfo | null = $state(null);
@@ -140,7 +141,13 @@
     }
     
     function handleSetClusterId(clusterId: string | null) {
+        selectingCluster = true;
+        
         dispatch('setClusterId', clusterId);
+        
+        setTimeout(() => {
+            selectingCluster = false;
+        }, 1000);
     }
     
     function formatMetricName(name: string): string {
@@ -164,11 +171,17 @@
     onMount(loadClusters);
 </script>
 
-<div class="cluster-selector">
+<div class="cluster-selector {selectingCluster ? 'is-selecting' : ''}">
+    {#if selectingCluster}
+        <div class="selecting-overlay">
+            <div class="selecting-message">Switching cluster...</div>
+        </div>
+    {/if}
+
     <div class="controls-section">
         <div class="header">
             <h3>Cluster Management</h3>
-            <button class="refresh" onclick={loadClusters} disabled={loading}>
+            <button class="refresh" onclick={loadClusters} disabled={loading || selectingCluster}>
                 🔄 Refresh
             </button>
         </div>
@@ -179,9 +192,9 @@
                 bind:value={newClusterPoints}
                 placeholder="Number of points"
                 min="1"
-                disabled={loading}
+                disabled={loading || selectingCluster}
             />
-            <button onclick={createNewCluster} disabled={loading}>
+            <button onclick={createNewCluster} disabled={loading || selectingCluster}>
                 {loading ? 'Creating...' : 'Create New Cluster'}
             </button>
         </div>
@@ -204,7 +217,7 @@
                                 <span class="points">{cluster?.numPoints?.toLocaleString()} points</span>
                                 <button class="load-button"
                                     onclick={() => handleSetClusterId(cluster.id)}
-                                    disabled={loading || cluster.id === selectedClusterId}
+                                    disabled={loading || selectingCluster || cluster.id === selectedClusterId}
                                 >
                                     {cluster.id === selectedClusterId ? 'Selected' : 'Select'}
                                 </button>
@@ -244,6 +257,33 @@
         flex-direction: column;
         gap: 1rem;
         height: 100%;
+        position: relative;
+    }
+
+    .selecting-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(255, 255, 255, 0.7);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 10;
+        backdrop-filter: blur(2px);
+    }
+
+    .selecting-message {
+        background: rgba(0, 0, 0, 0.7);
+        color: white;
+        padding: 10px 20px;
+        border-radius: 4px;
+        font-weight: 500;
+    }
+
+    .is-selecting {
+        pointer-events: none;
     }
 
     .controls-section {

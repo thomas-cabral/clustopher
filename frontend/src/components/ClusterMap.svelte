@@ -45,13 +45,61 @@
   
     const dispatch = createEventDispatcher();
   
+    // Track the previous clusterId to detect changes
+    let previousClusterId = $state<string | null>(null);
+  
     $effect(() => {
-        if (reloadTrigger && map) {
-            const bounds = map.getBounds();
-            if (bounds) {
-                fetchClusters(bounds, map.getZoom());
+        // Track clusterId and reloadTrigger by using them in the effect
+        const currentClusterId = clusterId;
+        const currentReloadTrigger = reloadTrigger;
+
+        if (!map) {
+            console.log('Map not ready');
+            return;
+        }
+
+        const clusterChanged = previousClusterId !== currentClusterId;
+        console.log('Cluster change detected:', { previous: previousClusterId, current: currentClusterId, changed: clusterChanged });
+        
+        // Immediately clear the map when cluster changes, don't wait for sourcedata event
+        if (clusterChanged) {
+            console.log('Immediately clearing map data');
+            isLoading = true;
+            metadata = null;
+            const source = map.getSource('clusters') as mapboxgl.GeoJSONSource;
+            if (source) {
+                source.setData({
+                    type: 'FeatureCollection',
+                    features: []
+                });
+            }
+            
+            // Update the previous cluster ID
+            previousClusterId = currentClusterId;
+            
+            // If no cluster is selected, just stop loading
+            if (!currentClusterId) {
+                isLoading = false;
+                return;
             }
         }
+
+        // Wait for map source to be ready before fetching new data
+        map.once('sourcedata', () => {
+            // Fetch new data if we have a clusterId and either:
+            // 1. The clusterId changed, or
+            // 2. The reloadTrigger was incremented
+            if (currentClusterId && (clusterChanged || currentReloadTrigger > 0)) {
+                console.log('Fetching new cluster data');
+                const bounds = map.getBounds();
+                if (bounds) {
+                    fetchClusters(bounds, map.getZoom());
+                }
+            } else {
+                // Ensure loading state is cleared if we're not fetching
+                isLoading = false;
+            }
+        });
     });
   
     async function fetchMetadata(bounds: mapboxgl.LngLatBounds, zoom: number) {
@@ -75,8 +123,13 @@
     }
   
     async function fetchClusters(bounds: mapboxgl.LngLatBounds, zoom: number) {
-        if (!clusterId) return;
+        if (!clusterId) {
+            console.log('No clusterId, skipping fetch');
+            isLoading = false;
+            return;
+        }
         
+        console.log('Fetching clusters for:', { clusterId, zoom });
         isLoading = true;
         try {
             await Promise.all([
@@ -90,10 +143,12 @@
                         west: bounds.getWest().toString(),
                     });
 
+                    console.log('Fetching from:', `${apiBaseUrl}/api/clusters/${clusterId}?${params}`);
                     const response = await fetch(`${apiBaseUrl}/api/clusters/${clusterId}?${params}`);
                     if (!response.ok) throw new Error('Failed to fetch clusters');
                     
                     const data = await response.json();
+                    console.log('Received cluster data:', data);
                     
                     const source = map.getSource('clusters') as mapboxgl.GeoJSONSource;
                     if (source) {
@@ -331,8 +386,10 @@
           popup.remove();
         });
   
-        // Initial fetch
-        fetchClusters(map.getBounds() as mapboxgl.LngLatBounds, map.getZoom());
+        // Initial fetch if we have a clusterId
+        if (clusterId) {
+            fetchClusters(map.getBounds() as mapboxgl.LngLatBounds, map.getZoom());
+        }
       });
   
       // Click handler for clusters
@@ -364,7 +421,10 @@
             west: bounds?.getWest() || 0,
             zoom: map.getZoom()
         });
-        fetchClusters(bounds as mapboxgl.LngLatBounds, map.getZoom());
+        
+        if (clusterId) {
+            fetchClusters(bounds as mapboxgl.LngLatBounds, map.getZoom());
+        }
       });
     });
   
@@ -385,75 +445,79 @@
             <div class="stats">
                 <div class="stat">
                     <label>Total Points:</label>
-                    <span>{metadata.totalPoints?.toLocaleString()}</span>
+                    <span>{(metadata.totalPoints ?? 0).toLocaleString()}</span>
                 </div>
                 <div class="stat">
                     <label>Clusters:</label>
-                    <span>{metadata.numClusters?.toLocaleString()}</span>
+                    <span>{(metadata.numClusters ?? 0).toLocaleString()}</span>
                 </div>
                 <div class="stat">
                     <label>Individual Points:</label>
-                    <span>{metadata.numSinglePoints?.toLocaleString()}</span>
+                    <span>{(metadata.numSinglePoints ?? 0).toLocaleString()}</span>
                 </div>
             </div>
 
-            {#if Object.keys(metadata?.metricsSummary || {}).length > 0}
+            {#if metadata.metricsSummary && Object.keys(metadata.metricsSummary).length > 0}
                 <h4>Metrics Summary</h4>
                 <div class="metrics-summary">
-                    {#each Object.entries(metadata?.metricsSummary || {}) as [metric, stats]}
-                        <div class="metric">
-                            <h5>{metric}</h5>
-                            <div class="metric-stats">
-                                <div>Min: {stats.min.toFixed(2)}</div>
-                                <div>Max: {stats.max.toFixed(2)}</div>
-                                <div>Avg: {stats.average.toFixed(2)}</div>
+                    {#each Object.entries(metadata.metricsSummary) as [metric, stats]}
+                        {#if stats && typeof stats.min !== 'undefined'}
+                            <div class="metric">
+                                <h5>{metric}</h5>
+                                <div class="metric-stats">
+                                    <div>Min: {stats.min.toFixed(2)}</div>
+                                    <div>Max: {stats.max.toFixed(2)}</div>
+                                    <div>Avg: {stats.average.toFixed(2)}</div>
+                                </div>
                             </div>
-                        </div>
+                        {/if}
                     {/each}
                 </div>
             {/if}
 
-            {#if Object.keys(metadata?.metadataSummary || {}).length > 0}
+            {#if metadata.metadataSummary && Object.keys(metadata.metadataSummary).length > 0}
                 <h4>Metadata Summary</h4>
                 <div class="metadata-summary">
                     {#each Object.entries(metadata.metadataSummary) as [key, value]}
-                        <div class="metadata-item">
-                            {#if value.time_range}
-                                <div class="time-range">
-                                    <h5>Time Range</h5>
-                                    <div>From: {new Date(value.time_range.earliest).toLocaleString()}</div>
-                                    <div>To: {new Date(value.time_range.latest).toLocaleString()}</div>
-                                </div>
-                            {:else if value.range}
-                                <div class="range-section">
-                                    <h5>{key.charAt(0).toUpperCase() + key.slice(1)}</h5>
-                                    <div class="range-stats">
-                                        <div>Min: {value.range.min.toFixed(1)}</div>
-                                        <div>Max: {value.range.max.toFixed(1)}</div>
-                                        {#if 'average' in value.range}
-                                            <div>Avg: {value.range.average.toFixed(1)}</div>
-                                        {/if}
+                        {#if value}
+                            <div class="metadata-item">
+                                {#if value.Earliest && value.Latest}
+                                    <!-- Handle TimeRange -->
+                                    <div class="time-range">
+                                        <h5>{key.charAt(0).toUpperCase() + key.slice(1)}</h5>
+                                        <div>From: {new Date(value.Earliest).toLocaleString()}</div>
+                                        <div>To: {new Date(value.Latest).toLocaleString()}</div>
                                     </div>
-                                </div>
-                            {:else if value.distribution}
-                                <div class="distribution-section">
-                                    <h5>{key.charAt(0).toUpperCase() + key.slice(1)}</h5>
-                                    <div class="distribution-list">
-                                        {#each Object.entries(value.distribution.values) as [subKey, percentage]}
-                                            <div class="distribution-item">
-                                                <span>{subKey}</span>
-                                                <span>{percentage.toFixed(1)}%</span>
-                                            </div>
-                                        {/each}
+                                {:else if value.Min !== undefined && value.Max !== undefined}
+                                    <!-- Handle MetadataRange -->
+                                    <div class="range-section">
+                                        <h5>{key.charAt(0).toUpperCase() + key.slice(1)}</h5>
+                                        <div class="range-stats">
+                                            <div>Min: {value.Min.toFixed(1)}</div>
+                                            <div>Max: {value.Max.toFixed(1)}</div>
+                                            {#if value.Average !== undefined}
+                                                <div>Avg: {value.Average.toFixed(1)}</div>
+                                            {/if}
+                                        </div>
                                     </div>
-                                </div>
-                            {:else if value.single_value}
-                                <div class="single-value">
-                                    <h5>{key.charAt(0).toUpperCase() + key.slice(1)}</h5>
-                                    <span>{value.single_value}</span>
-                                </div>
-                            {/if}
-                        </div>
+                                {:else}
+                                    <!-- Handle distribution -->
+                                    <div class="distribution-section">
+                                        <h5>{key.charAt(0).toUpperCase() + key.slice(1)}</h5>
+                                        <div class="distribution-list">
+                                            {#each Object.entries(value) as [subKey, freq]}
+                                                {#if typeof freq === 'number'}
+                                                    <div class="distribution-item">
+                                                        <span>{subKey}</span>
+                                                        <span>{freq.toFixed(1)}%</span>
+                                                    </div>
+                                                {/if}
+                                            {/each}
+                                        </div>
+                                    </div>
+                                {/if}
+                            </div>
+                        {/if}
                     {/each}
                 </div>
             {/if}
@@ -584,9 +648,8 @@
     }
 
     .metadata-item {
-        display: flex;
-        justify-content: space-between;
         font-size: 13px;
+        margin-bottom: 8px;
     }
 
     .metadata-item label {

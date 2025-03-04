@@ -88,10 +88,10 @@ func main() {
 	})
 
 	type ClusterInfo struct {
-		Id string `json:"id"`
-		NumPoints int `json:"numPoints"`
+		Id        string `json:"id"`
+		NumPoints int    `json:"numPoints"`
 		Timestamp string `json:"timestamp"`
-		FileSize int64 `json:"fileSize"`
+		FileSize  int64  `json:"fileSize"`
 	}
 
 	// List available clusters
@@ -275,45 +275,40 @@ func handleGetMetadata(c *gin.Context, server *Server, clusterID string) {
 		return
 	}
 
-	// Convert the response to match frontend expectations
-	metricsSummary := make(map[string]map[string]float64)
-	for metric, stats := range resp.MetricsSummary {
-		metricsSummary[metric] = map[string]float64{
-			"min":     stats.Min,
-			"max":     stats.Max,
-			"average": stats.Average,
-		}
-	}
+	// Add debug logging
+	fmt.Printf("Raw metadata response: %+v\n", resp.MetadataSummary)
 
 	metadataSummary := make(map[string]interface{})
 	for key, value := range resp.MetadataSummary {
-		if value.Distribution != nil {
-			metadataSummary[key] = map[string]interface{}{
-				"distribution": map[string]interface{}{
-					"values": value.Distribution.Values,
-				},
-			}
+		fmt.Printf("Processing key %s, value: %+v\n", key, value)
+		if value.Distribution != nil && value.Distribution.Values != nil {
+			metadataSummary[key] = value.Distribution.Values
 		} else if value.TimeRange != nil {
 			metadataSummary[key] = map[string]interface{}{
-				"earliest": value.TimeRange.Earliest,
-				"latest":   value.TimeRange.Latest,
+				"Earliest": value.TimeRange.Earliest,
+				"Latest":   value.TimeRange.Latest,
 			}
 		} else if value.Range != nil {
 			metadataSummary[key] = map[string]interface{}{
-				"min":     value.Range.Min,
-				"max":     value.Range.Max,
-				"average": value.Range.Average,
+				"Min":     value.Range.Min,
+				"Max":     value.Range.Max,
+				"Average": value.Range.Average,
 			}
 		} else if value.SingleValue != "" {
-			metadataSummary[key] = value.SingleValue
+			metadataSummary[key] = map[string]float64{
+				value.SingleValue: 100.0,
+			}
 		}
 	}
+
+	// Add debug logging for final output
+	fmt.Printf("Final metadata summary: %+v\n", metadataSummary)
 
 	c.JSON(http.StatusOK, gin.H{
 		"totalPoints":     resp.TotalPoints,
 		"numClusters":     resp.NumClusters,
 		"numSinglePoints": resp.NumSinglePoints,
-		"metricsSummary":  metricsSummary,
+		"metricsSummary":  resp.MetricsSummary,
 		"metadataSummary": metadataSummary,
 	})
 }

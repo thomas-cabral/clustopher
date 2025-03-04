@@ -3,9 +3,11 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"syscall"
 	"web/clustopher/proto"
 	"web/clustopher/runner"
@@ -15,6 +17,24 @@ import (
 )
 
 func main() {
+
+	 // Create CPU profile
+	 f, err := os.Create("clustering_profile.pprof")
+	 if err != nil {
+		 log.Fatal(err)
+	 }
+	 
+	 // Start profiling
+	 if err := pprof.StartCPUProfile(f); err != nil {
+		 f.Close()
+		 log.Fatal(err)
+	 }
+ 
+	 // Ensure cleanup happens
+	 defer func() {
+		 pprof.StopCPUProfile()
+		 f.Close()
+	 }()
 	// Parse command line flags
 	port := flag.Int("port", 50051, "The gRPC server port")
 	maxClusters := flag.Int("max-clusters", 5, "Maximum number of clusters to keep in memory")
@@ -50,4 +70,7 @@ func main() {
 		fmt.Printf("Failed to serve: %v\n", err)
 		os.Exit(1)
 	}
+
+	pprof.StopCPUProfile()
+	f.Close()
 }
