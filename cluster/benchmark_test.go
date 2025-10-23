@@ -221,3 +221,129 @@ func TestProfileClustering(t *testing.T) {
 		}
 	}
 }
+
+// BenchmarkMetadataFrequency benchmarks the optimized metadata frequency calculation
+func BenchmarkMetadataFrequency_Small(b *testing.B) {
+	benchmarkMetadataFrequency(b, 100, 5)
+}
+
+func BenchmarkMetadataFrequency_Medium(b *testing.B) {
+	benchmarkMetadataFrequency(b, 1000, 10)
+}
+
+func BenchmarkMetadataFrequency_Large(b *testing.B) {
+	benchmarkMetadataFrequency(b, 10000, 20)
+}
+
+func benchmarkMetadataFrequency(b *testing.B, numPoints int, numKeys int) {
+	sc := NewSupercluster(SuperclusterOptions{
+		MinZoom:   0,
+		MaxZoom:   16,
+		MinPoints: 3,
+		Radius:    40,
+		Extent:    512,
+		NodeSize:  64,
+		Log:       false,
+	})
+
+	// Create points with metadata
+	pointIDs := make([]uint32, numPoints)
+	for i := 0; i < numPoints; i++ {
+		pointID := uint32(i + 1)
+		pointIDs[i] = pointID
+
+		// Add multiple metadata entries per point
+		entries := make([]MetadataEntry, numKeys)
+		for j := 0; j < numKeys; j++ {
+			keyName := fmt.Sprintf("key_%d", j)
+			sc.metadataStore.addMetadata(pointID, keyName, fmt.Sprintf("value_%d", j%5))
+			entries[j] = MetadataEntry{
+				Key: MetadataKey(j),
+				Value: MetadataValue{
+					Type:      0,
+					StringVal: fmt.Sprintf("value_%d", j%5),
+				},
+			}
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sc.metadataStore.CalculateFrequencies(pointIDs)
+	}
+}
+
+// BenchmarkViewportFinding benchmarks the adaptive sampling optimization
+func BenchmarkViewportFinding_Small(b *testing.B) {
+	benchmarkViewportFinding(b, 10000)
+}
+
+func BenchmarkViewportFinding_Medium(b *testing.B) {
+	benchmarkViewportFinding(b, 100000)
+}
+
+func BenchmarkViewportFinding_Large(b *testing.B) {
+	benchmarkViewportFinding(b, 1000000)
+}
+
+func benchmarkViewportFinding(b *testing.B, numPoints int) {
+	sc := NewSupercluster(SuperclusterOptions{
+		MinZoom:   0,
+		MaxZoom:   16,
+		MinPoints: 3,
+		Radius:    40,
+		Extent:    512,
+		NodeSize:  64,
+		Log:       false,
+	})
+
+	// Generate random points
+	points := generateRandomPoints(numPoints, -180.0, 180.0, -85.0, 85.0)
+
+	// Load points
+	sc.Load(points)
+
+	// Define a viewport (10% of world)
+	bounds := KDBounds{
+		MinX: -20.0,
+		MinY: -20.0,
+		MaxX: 20.0,
+		MaxY: 20.0,
+	}
+	zoom := 8
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sc.GetClusters(bounds, zoom)
+	}
+}
+
+// BenchmarkGridClustering benchmarks sparse vs dense grid optimization
+func BenchmarkGridClustering_Sparse(b *testing.B) {
+	benchmarkGridClustering(b, 10000, -180.0, 180.0, -85.0, 85.0) // Sparse: worldwide
+}
+
+func BenchmarkGridClustering_Dense(b *testing.B) {
+	benchmarkGridClustering(b, 10000, -10.0, 10.0, -10.0, 10.0) // Dense: small area
+}
+
+func benchmarkGridClustering(b *testing.B, numPoints int, minLng, maxLng, minLat, maxLat float32) {
+	sc := NewSupercluster(SuperclusterOptions{
+		MinZoom:   0,
+		MaxZoom:   16,
+		MinPoints: 3,
+		Radius:    40,
+		Extent:    512,
+		NodeSize:  64,
+		Log:       false,
+	})
+
+	points := generateRandomPoints(numPoints, minLng, maxLng, minLat, maxLat)
+	zoom := 4
+	kdPoints := generateKDPoints(sc, points, zoom)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sc.clusterPointsWithGrid(kdPoints, float32(sc.Options.Radius), zoom)
+	}
+}

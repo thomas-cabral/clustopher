@@ -215,8 +215,16 @@ func (ms *MetadataStore) CalculateFrequencies(pointIDs []uint32) map[string]json
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
 
-	// Count unique keys across all points
-	keySet := make(map[MetadataKey]bool)
+	// OPTIMIZATION: Single-pass frequency calculation O(n) instead of O(n*k)
+	// Build frequency maps for all keys simultaneously in one iteration
+	type keyFreqData struct {
+		valueFreq   map[string]int
+		totalPoints int
+	}
+
+	keyFreqs := make(map[MetadataKey]*keyFreqData)
+
+	// Single pass through all points to collect frequency data
 	for _, id := range pointIDs {
 		entries, ok := ms.pointMeta[id]
 		if !ok {
@@ -224,59 +232,49 @@ func (ms *MetadataStore) CalculateFrequencies(pointIDs []uint32) map[string]json
 		}
 
 		for _, entry := range entries {
-			keySet[entry.Key] = true
+			// Get or create frequency data for this key
+			freqData, exists := keyFreqs[entry.Key]
+			if !exists {
+				freqData = &keyFreqData{
+					valueFreq: make(map[string]int),
+				}
+				keyFreqs[entry.Key] = freqData
+			}
+
+			// Convert value to string representation
+			var valueStr string
+			switch entry.Value.Type {
+			case 0: // string
+				valueStr = entry.Value.StringVal
+			case 1: // number
+				valueStr = fmt.Sprintf("%g", entry.Value.NumVal)
+			case 2: // bool
+				valueStr = fmt.Sprintf("%t", entry.Value.BoolVal)
+			}
+
+			freqData.valueFreq[valueStr]++
+			freqData.totalPoints++
 		}
 	}
 
-	if len(keySet) == 0 {
+	if len(keyFreqs) == 0 {
 		return nil
 	}
 
-	result := make(map[string]json.RawMessage, len(keySet))
+	// Convert to final result format
+	result := make(map[string]json.RawMessage, len(keyFreqs))
 
-	// For each key, calculate value frequencies
-	for keyID := range keySet {
+	for keyID, freqData := range keyFreqs {
 		if int(keyID) >= len(ms.idToKey) {
 			continue
 		}
 
 		key := ms.idToKey[keyID]
 
-		// Count value frequencies
-		valueFreq := make(map[string]int)
-		totalPoints := 0
-
-		for _, id := range pointIDs {
-			entries, ok := ms.pointMeta[id]
-			if !ok {
-				continue
-			}
-
-			for _, entry := range entries {
-				if entry.Key != keyID {
-					continue
-				}
-
-				// Convert value to string representation
-				var valueStr string
-				switch entry.Value.Type {
-				case 0: // string
-					valueStr = entry.Value.StringVal
-				case 1: // number
-					valueStr = fmt.Sprintf("%g", entry.Value.NumVal)
-				case 2: // bool
-					valueStr = fmt.Sprintf("%t", entry.Value.BoolVal)
-				}
-
-				valueFreq[valueStr]++
-				totalPoints++
-			}
-		}
-
 		// Convert to frequency percentages
-		freqMap := make(map[string]float64, len(valueFreq))
-		for val, count := range valueFreq {
-			freqMap[val] = float64(count) / float64(totalPoints)
+		freqMap := make(map[string]float64, len(freqData.valueFreq))
+		for val, count := range freqData.valueFreq {
+			freqMap[val] = float64(count) / float64(freqData.totalPoints)
 		}
 
 		// Marshal to JSON
@@ -967,8 +965,10 @@ func (sc *Supercluster) findPointsInViewport(bounds KDBounds, zoom int, result [
 
 	// At medium zoom levels, use sampling to choose best approach
 	if totalPoints > 100000 {
-		// Sample points to estimate viewport density
-		sampleSize := 1000
+		// OPTIMIZATION: Adaptive sample size scales with dataset size
+		// Use sqrt(n) for balance between accuracy and performance
+		// Min 1000 for small datasets, max 10000 to cap overhead
+		sampleSize := int(math.Min(10000, math.Max(1000, math.Sqrt(float64(totalPoints)))))
 		step := totalPoints / sampleSize
 		inViewport := 0
 
@@ -1562,12 +1562,18 @@ func (sc *Supercluster) clusterPointsWithGrid(points []KDPoint, radius float32, 
 	gridCapacity := int(float32(numPoints) * 1.2) // Allow 20% overhead
 	grid := make(map[[2]int][]int, gridCapacity)
 
+	// OPTIMIZATION: Track non-empty cells to skip empty cell lookups
+	nonEmptyCells := make([][2]int, 0, gridCapacity/10) // Estimate ~10% occupancy
+
 	// Insert points into grid
 	for i, p := range points {
 		cellX := int((p.X-minX)/cellSize) + 1
 		cellY := int((p.Y-minY)/cellSize) + 1
 
 		cell := [2]int{cellX, cellY}
+		if _, exists := grid[cell]; !exists {
+			nonEmptyCells = append(nonEmptyCells, cell)
+		}
 		grid[cell] = append(grid[cell], i)
 	}
 
@@ -1615,30 +1621,65 @@ func (sc *Supercluster) clusterPointsWithGrid(points []KDPoint, radius float32, 
 			}
 		}
 
-		// Check surrounding cells within cellRange
-		for dy := -cellRange; dy <= cellRange; dy++ {
-			ny := cellY + dy
+		// OPTIMIZATION: Choose neighbor search strategy based on grid sparsity
+		// For sparse grids, iterating non-empty cells is faster than checking all potential neighbors
+		maxPossibleCells := (2*cellRange + 1) * (2*cellRange + 1) // e.g., 9 for cellRange=1
+		useSparseOptimization := len(nonEmptyCells) > 0 && len(nonEmptyCells) < maxPossibleCells*20
 
-			for dx := -cellRange; dx <= cellRange; dx++ {
-				nx := cellX + dx
-				cell := [2]int{nx, ny}
+		if useSparseOptimization {
+			// Sparse grid: iterate through non-empty cells and check if they're in range
+			for _, cell := range nonEmptyCells {
+				// Check if cell is within range
+				dcx := cell[0] - cellX
+				dcy := cell[1] - cellY
+				if dcx < -cellRange || dcx > cellRange || dcy < -cellRange || dcy > cellRange {
+					continue
+				}
 
-				// Skip if cell doesn't exist (outside grid bounds or no points)
-				if cellIndices, ok := grid[cell]; ok {
-					for _, pointIdx := range cellIndices {
-						other := points[pointIdx]
+				cellIndices := grid[cell]
+				for _, pointIdx := range cellIndices {
+					other := points[pointIdx]
 
-						if other.ID == p.ID || processed[other.ID] {
-							continue
-						}
+					if other.ID == p.ID || processed[other.ID] {
+						continue
+					}
 
-						// Fast distance check
-						dx := other.X - p.X
-						dy := other.Y - p.Y
-						distSq := dx*dx + dy*dy
+					// Fast distance check
+					dx := other.X - p.X
+					dy := other.Y - p.Y
+					distSq := dx*dx + dy*dy
 
-						if distSq <= radiusSquared {
-							nearby = append(nearby, other)
+					if distSq <= radiusSquared {
+						nearby = append(nearby, other)
+					}
+				}
+			}
+		} else {
+			// Dense grid: use traditional nested loop with map lookups
+			for dy := -cellRange; dy <= cellRange; dy++ {
+				ny := cellY + dy
+
+				for dx := -cellRange; dx <= cellRange; dx++ {
+					nx := cellX + dx
+					cell := [2]int{nx, ny}
+
+					// Skip if cell doesn't exist (outside grid bounds or no points)
+					if cellIndices, ok := grid[cell]; ok {
+						for _, pointIdx := range cellIndices {
+							other := points[pointIdx]
+
+							if other.ID == p.ID || processed[other.ID] {
+								continue
+							}
+
+							// Fast distance check
+							dx := other.X - p.X
+							dy := other.Y - p.Y
+							distSq := dx*dx + dy*dy
+
+							if distSq <= radiusSquared {
+								nearby = append(nearby, other)
+							}
 						}
 					}
 				}
