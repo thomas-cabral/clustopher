@@ -1,0 +1,542 @@
+[
+  {
+    "ID": 352,
+    "X": -119.7494,
+    "Y": 28.146883,
+    "Count": 49,
+    "Children": null,
+    "Metrics": {
+      "value": 2462.7678
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 277,
+    "X": -109.94052,
+    "Y": 29.597929,
+    "Count": 57,
+    "Children": null,
+    "Metrics": {
+      "value": 3004.3147
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 443,
+    "X": -122.27672,
+    "Y": 33.060383,
+    "Count": 23,
+    "Children": null,
+    "Metrics": {
+      "value": 1130.7522
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 374,
+    "X": -116.51295,
+    "Y": 34.71625,
+    "Count": 29,
+    "Children": null,
+    "Metrics": {
+      "value": 1117.266
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 798,
+    "X": -110.7198,
+    "Y": 37.482094,
+    "Count": 35,
+    "Children": null,
+    "Metrics": {
+      "value": 1858.0656
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 893,
+    "X": -122.369675,
+    "Y": 38.951218,
+    "Count": 15,
+    "Children": null,
+    "Metrics": {
+      "value": 671.93225
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 632,
+    "X": -101.669914,
+    "Y": 27.94508,
+    "Count": 28,
+    "Children": null,
+    "Metrics": {
+      "value": 1709.0065
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 601,
+    "X": -93.16372,
+    "Y": 28.111713,
+    "Count": 42,
+    "Children": null,
+    "Metrics": {
+      "value": 2137.917
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 433,
+    "X": -102.393105,
+    "Y": 33.008446,
+    "Count": 16,
+    "Children": null,
+    "Metrics": {
+      "value": 640.0459
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 266,
+    "X": -95.46188,
+    "Y": 33.872116,
+    "Count": 28,
+    "Children": null,
+    "Metrics": {
+      "value": 1613.0065
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 161,
+    "X": -93.526665,
+    "Y": 37.775013,
+    "Count": 48,
+    "Children": null,
+    "Metrics": {
+      "value": 2252.1008
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 784,
+    "X": -101.85831,
+    "Y": 40.33284,
+    "Count": 17,
+    "Children": null,
+    "Metrics": {
+      "value": 908.8937
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 326,
+    "X": -116.76872,
+    "Y": 42.02868,
+    "Count": 30,
+    "Children": null,
+    "Metrics": {
+      "value": 1473.8381
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 255,
+    "X": -109.65455,
+    "Y": 43.43592,
+    "Count": 30,
+    "Children": null,
+    "Metrics": {
+      "value": 1512.466
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 330,
+    "X": -122.95274,
+    "Y": 44.47135,
+    "Count": 22,
+    "Children": null,
+    "Metrics": {
+      "value": 1052.5331
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 653,
+    "X": -115.47731,
+    "Y": 47.021168,
+    "Count": 23,
+    "Children": null,
+    "Metrics": {
+      "value": 1354.091
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 49,
+    "X": -122.46062,
+    "Y": 47.970493,
+    "Count": 6,
+    "Children": null,
+    "Metrics": {
+      "value": 271.27002
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 736,
+    "X": -98.03723,
+    "Y": 43.546246,
+    "Count": 37,
+    "Children": null,
+    "Metrics": {
+      "value": 2046.5095
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 532,
+    "X": -104.98983,
+    "Y": 47.56776,
+    "Count": 23,
+    "Children": null,
+    "Metrics": {
+      "value": 1325.4937
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 664,
+    "X": -95.61795,
+    "Y": 47.528706,
+    "Count": 18,
+    "Children": null,
+    "Metrics": {
+      "value": 853.95905
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 436,
+    "X": -84.080185,
+    "Y": 28.048954,
+    "Count": 55,
+    "Children": null,
+    "Metrics": {
+      "value": 2674.2473
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 324,
+    "X": -86.64379,
+    "Y": 32.08941,
+    "Count": 14,
+    "Children": null,
+    "Metrics": {
+      "value": 851.01105
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 897,
+    "X": -79.74817,
+    "Y": 32.02191,
+    "Count": 39,
+    "Children": null,
+    "Metrics": {
+      "value": 1972.0063
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 541,
+    "X": -70.3546,
+    "Y": 27.690834,
+    "Count": 56,
+    "Children": null,
+    "Metrics": {
+      "value": 2745.089
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 645,
+    "X": -73.47199,
+    "Y": 32.788734,
+    "Count": 25,
+    "Children": null,
+    "Metrics": {
+      "value": 1031.9047
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 829,
+    "X": -67.67618,
+    "Y": 33.77303,
+    "Count": 20,
+    "Children": null,
+    "Metrics": {
+      "value": 845.50397
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 770,
+    "X": -84.46509,
+    "Y": 38.754425,
+    "Count": 22,
+    "Children": null,
+    "Metrics": {
+      "value": 1171.5183
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 37,
+    "X": -79.10074,
+    "Y": 41.16744,
+    "Count": 49,
+    "Children": null,
+    "Metrics": {
+      "value": 2345.1062
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 737,
+    "X": -89.19208,
+    "Y": 44.204113,
+    "Count": 20,
+    "Children": null,
+    "Metrics": {
+      "value": 817.2865
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 551,
+    "X": -83.17369,
+    "Y": 46.930614,
+    "Count": 33,
+    "Children": null,
+    "Metrics": {
+      "value": 1829.7115
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 567,
+    "X": -90.906265,
+    "Y": 47.88327,
+    "Count": 6,
+    "Children": null,
+    "Metrics": {
+      "value": 246.03491
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 110,
+    "X": -70.50394,
+    "Y": 38.444096,
+    "Count": 23,
+    "Children": null,
+    "Metrics": {
+      "value": 1075.245
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 315,
+    "X": -67.268486,
+    "Y": 41.173622,
+    "Count": 11,
+    "Children": null,
+    "Metrics": {
+      "value": 596.1148
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 621,
+    "X": -71.86464,
+    "Y": 44.92886,
+    "Count": 33,
+    "Children": null,
+    "Metrics": {
+      "value": 1360.9124
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 816,
+    "X": -66.413086,
+    "Y": 46.05677,
+    "Count": 9,
+    "Children": null,
+    "Metrics": {
+      "value": 583.81525
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 369,
+    "X": -72.51507,
+    "Y": 48.163387,
+    "Count": 9,
+    "Children": null,
+    "Metrics": {
+      "value": 333.00336
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  }
+]
