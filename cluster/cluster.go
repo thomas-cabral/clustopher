@@ -482,6 +482,11 @@ type SuperclusterOptions struct {
 	NodeSize  int
 	Extent    int
 	Log       bool
+
+	// ZSplit selects the routing cutoff in GetClusters: queries with zoom
+	// < ZSplit use the CH rollup path; queries with zoom >= ZSplit use the
+	// skeleton-tree path. Default 11 (set by NewSupercluster when 0).
+	ZSplit int
 }
 
 // GeoJSON types
@@ -546,6 +551,9 @@ func NewSupercluster(options SuperclusterOptions) *Supercluster {
 	}
 	if options.MinPoints <= 0 {
 		options.MinPoints = 3
+	}
+	if options.ZSplit == 0 {
+		options.ZSplit = 11
 	}
 
 	// Validate zoom levels
