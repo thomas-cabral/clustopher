@@ -3,9 +3,6 @@ package runner
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -54,49 +51,22 @@ func (r *ClusterRunner) CreateCluster(ctx context.Context, req *pb.CreateCluster
 		return nil, fmt.Errorf("failed to load points: %v", err)
 	}
 
-	// Generate filename with timestamp and UUID
-	savePath := generateClusterFilename(int(req.NumPoints))
-	fmt.Printf("Saving new cluster to %s...\n", savePath)
+	id := uuid.New().String()[:8]
 
-	// Save the cluster
-	if err := supercluster.SaveCompressed(savePath); err != nil {
-		return nil, fmt.Errorf("failed to save cluster: %v", err)
-	}
-
-	// Extract ID from filename
-	// Format: cluster-{numPoints}p-{timestamp}-{id}.zst
-	parts := strings.Split(filepath.Base(savePath), "-")
-	if len(parts) != 5 {
-		return nil, fmt.Errorf("invalid filename format")
-	}
-	id := strings.TrimSuffix(parts[4], ".zst")
-
-	// Add to loaded clusters
+	// Add to loaded clusters (in-memory only; zstd persistence removed)
 	r.clusterLock.Lock()
 	r.clusters[id] = supercluster
 	r.lastAccessed[id] = time.Now()
 	r.clusterLock.Unlock()
-
-	// Get file info for response
-	fileInfo, err := os.Stat(savePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get file info: %v", err)
-	}
 
 	return &pb.CreateClusterResponse{
 		Cluster: &pb.ClusterInfo{
 			Id:        id,
 			NumPoints: req.NumPoints,
 			Timestamp: time.Now().Format(time.RFC3339),
-			FileSize:  fileInfo.Size(),
+			FileSize:  0,
 		},
 	}, nil
-}
-
-func generateClusterFilename(numPoints int) string {
-	timestamp := time.Now().Format("20060102-150405")
-	id := uuid.New().String()[:8] // Use first 8 chars of UUID for brevity
-	return filepath.Join("data/clusters", fmt.Sprintf("cluster-%dp-%s-%s.zst", numPoints, timestamp, id))
 }
 
 func NewClusterRunner(maxClusters int) *ClusterRunner {
@@ -141,21 +111,6 @@ func (r *ClusterRunner) cleanupInactiveClusters() {
 	}
 }
 
-func findClusterFile(id string) (string, error) {
-	files, err := os.ReadDir("data/clusters")
-	if err != nil {
-		return "", fmt.Errorf("failed to read clusters directory: %v", err)
-	}
-
-	for _, file := range files {
-		if strings.Contains(file.Name(), id) && strings.HasSuffix(file.Name(), ".zst") {
-			return filepath.Join("data/clusters", file.Name()), nil
-		}
-	}
-
-	return "", fmt.Errorf("no cluster file found with id %s", id)
-}
-
 func (r *ClusterRunner) loadClusterIfNeeded(id string) error {
 	r.clusterLock.Lock()
 	defer r.clusterLock.Unlock()
@@ -187,21 +142,8 @@ func (r *ClusterRunner) loadClusterIfNeeded(id string) error {
 		}
 	}
 
-	// Find the cluster file
-	clusterFile, err := findClusterFile(id)
-	if err != nil {
-		return fmt.Errorf("failed to find cluster file: %v", err)
-	}
-
-	// Load the requested cluster
-	supercluster, err := cluster.LoadCompressedSupercluster(clusterFile)
-	if err != nil {
-		return fmt.Errorf("failed to load cluster %s: %v", id, err)
-	}
-
-	r.clusters[id] = supercluster
-	r.lastAccessed[id] = time.Now()
-	return nil
+	// zstd file persistence removed; clusters are in-memory only.
+	return fmt.Errorf("cluster %s not found in memory (zstd persistence removed; use CH)", id)
 }
 
 // Rest of the gRPC service implementations remain the same

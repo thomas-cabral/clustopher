@@ -95,15 +95,11 @@ func runSingleProfile(numPoints, zoomLevel int) {
 	// Time the clustering
 	start := time.Now()
 
-	// Run the new optimized selection logic
-	if numPoints > 50000 ||
-		zoomLevel < sc.Options.MaxZoom/4 {
-		fmt.Println("Using grid-based clustering")
-		sc.ClusterPoints(kdPoints, zoomLevel)
-	} else {
-		fmt.Println("Using traditional clustering")
-		sc.ClusterPoints(kdPoints, zoomLevel)
-	}
+	// Grid/KDTree routing removed; clustering now goes through ClickHouse.
+	// This profiler tool profiles in-memory point projection only.
+	fmt.Println("Note: grid/KDTree clustering removed; profiling projection only")
+	_ = sc
+	_ = kdPoints
 
 	duration := time.Since(start)
 
@@ -151,22 +147,13 @@ func runProfileBattery() {
 			var memStatsBefore, memStatsAfter runtime.MemStats
 			runtime.ReadMemStats(&memStatsBefore)
 
-			// Run traditional or grid-based clustering based on new optimization rules
-			useGrid := points > 50000 ||
-				zoom < sc.Options.MaxZoom/4
-
-			method := "Traditional"
-			if useGrid {
-				method = "Grid"
-			}
+			// Grid/KDTree routing removed; clustering now goes through ClickHouse.
+			method := "CH"
+			_ = sc
+			_ = kdPoints
 
 			// Time the execution
 			start := time.Now()
-			if useGrid {
-				sc.ClusterPoints(kdPoints, zoom)
-			} else {
-				sc.ClusterPoints(kdPoints, zoom)
-			}
 			duration := time.Since(start)
 
 			// Collect stats after
