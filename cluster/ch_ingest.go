@@ -3,7 +3,19 @@ package cluster
 import (
 	"context"
 	"fmt"
+
+	"github.com/ClickHouse/clickhouse-go/v2"
 )
+
+// insertSettings tunes the CH server for bulk ingest into clustopher.points.
+// parallel_view_processing fans the 16 rollup MVs out in parallel rather than
+// sequentially per insert block. The larger block sizes coalesce small inserts
+// server-side so SummingMergeTree creates fewer parts to merge.
+var insertSettings = clickhouse.Settings{
+	"parallel_view_processing":   uint64(1),
+	"max_insert_block_size":      uint64(1_048_576),
+	"min_insert_block_size_rows": uint64(1_048_576),
+}
 
 // CHPointRow is the row-shape used to insert into clustopher.points.
 type CHPointRow struct {
@@ -20,6 +32,7 @@ type CHPointRow struct {
 // Rows should already be in (cluster_id, id) primary-key order to minimize
 // MergeTree merges.
 func (c *CHClient) InsertPoints(ctx context.Context, rows []CHPointRow) error {
+	ctx = clickhouse.Context(ctx, clickhouse.WithSettings(insertSettings))
 	batch, err := c.conn.PrepareBatch(ctx,
 		"INSERT INTO clustopher.points (cluster_id, id, external_id, x, y, metrics, metadata)")
 	if err != nil {

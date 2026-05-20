@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"sync"
 )
 
@@ -110,6 +111,16 @@ type Geometry struct {
 const (
 	latTableSize = 1024
 	latTableStep = 180.0 / float32(latTableSize)
+
+	// DefaultRollupRadius is the pixel radius baked into the per-zoom rollup
+	// materialized views (see migrations/002_rollup_template.sql). The
+	// migration runner substitutes this into the {RADIUS} placeholder when
+	// creating the MVs, and queryRollup multiplies viewport bounds by the
+	// same value to recover the stored tile range.
+	//
+	// Changing this requires recreating all rollup_z* tables and their MVs;
+	// MVs are not auto-updated when this constant changes.
+	DefaultRollupRadius = 40
 )
 
 // NewSupercluster creates a new clustering instance
@@ -128,7 +139,7 @@ func NewSupercluster(options SuperclusterOptions) *Supercluster {
 		options.Extent = 512
 	}
 	if options.Radius <= 0 {
-		options.Radius = 40
+		options.Radius = DefaultRollupRadius
 	}
 	if options.MinPoints <= 0 {
 		options.MinPoints = 3
@@ -199,7 +210,11 @@ func (sc *Supercluster) buildSkeletonAndPersist(points []Point) error {
 	projected := make([]KDPoint, len(points))
 	for i, p := range points {
 		proj := sc.projectFast(p.X, p.Y, sc.Options.MaxZoom)
-		projected[i] = KDPoint{ID: p.ID, X: proj[0], Y: proj[1], NumPoints: 1}
+		// Stash the index into `points` in ID so insertToCH can recover
+		// metrics/metadata without building a 15M-entry lookup map.
+		// BuildSkeletonWithRemap overwrites ID with the internal 1..N id and
+		// preserves this original index in the returned remap slice.
+		projected[i] = KDPoint{ID: uint32(i), X: proj[0], Y: proj[1], NumPoints: 1}
 	}
 	sorted := SortPointsIntoLeafOrder(projected, sc.Options.NodeSize)
 	tree, remap := BuildSkeletonWithRemap(sorted, sc.Options.NodeSize)
@@ -216,51 +231,102 @@ func (sc *Supercluster) buildSkeletonAndPersist(points []Point) error {
 	return nil
 }
 
-// insertToCH inserts sorted points (with internal ids already assigned) into
-// ClickHouse. remap[i] is the external id for sorted[i]. original is used to
-// look up metrics/metadata by external id.
-func (sc *Supercluster) insertToCH(ctx context.Context, sorted []KDPoint, remap []uint32, original []Point) error {
-	// Build a lookup from external_id -> original Point (for metrics/metadata).
-	byExt := make(map[uint32]*Point, len(original))
-	for i := range original {
-		byExt[original[i].ID] = &original[i]
+// stringifyMeta converts a Metadata map (with interface{} values) to a
+// string-keyed string map. Hot path during bulk Load — uses a type switch
+// instead of fmt.Sprintf to avoid reflect + allocations on common scalar types.
+func stringifyMeta(in map[string]interface{}) map[string]string {
+	if len(in) == 0 {
+		return nil
 	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		switch x := v.(type) {
+		case string:
+			out[k] = x
+		case int:
+			out[k] = strconv.Itoa(x)
+		case int32:
+			out[k] = strconv.FormatInt(int64(x), 10)
+		case int64:
+			out[k] = strconv.FormatInt(x, 10)
+		case uint32:
+			out[k] = strconv.FormatUint(uint64(x), 10)
+		case uint64:
+			out[k] = strconv.FormatUint(x, 10)
+		case float32:
+			out[k] = strconv.FormatFloat(float64(x), 'g', -1, 32)
+		case float64:
+			out[k] = strconv.FormatFloat(x, 'g', -1, 64)
+		case bool:
+			if x {
+				out[k] = "true"
+			} else {
+				out[k] = "false"
+			}
+		case nil:
+			out[k] = ""
+		default:
+			out[k] = fmt.Sprintf("%v", v)
+		}
+	}
+	return out
+}
 
-	const batchSize = 100_000
+// insertToCH inserts sorted points (with internal ids already assigned) into
+// ClickHouse. remap[i] is the index of sorted[i] in original (set during
+// projection in buildSkeletonAndPersist), so metrics/metadata can be fetched
+// with a direct slice index — no per-row hash lookup, no 15M-entry map alloc.
+//
+// Sends pipeline through a 1-buffer channel: a dedicated sender goroutine ships
+// the previous batch to CH while the main loop builds the next one. CH-side
+// MV fanout and Go-side row build overlap.
+func (sc *Supercluster) insertToCH(ctx context.Context, sorted []KDPoint, remap []uint32, original []Point) error {
+	const batchSize = 500_000
+	sendCh := make(chan []CHPointRow, 1)
+	errCh := make(chan error, 1)
+	sendCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		for b := range sendCh {
+			if err := sc.ch.InsertPoints(sendCtx, b); err != nil {
+				errCh <- err
+				// Drain remaining batches so the producer doesn't block on send.
+				for range sendCh {
+				}
+				return
+			}
+		}
+		errCh <- nil
+	}()
+
 	rows := make([]CHPointRow, 0, batchSize)
 	flush := func() error {
 		if len(rows) == 0 {
 			return nil
 		}
-		if err := sc.ch.InsertPoints(ctx, rows); err != nil {
+		select {
+		case sendCh <- rows:
+		case err := <-errCh:
+			// Sender failed before consuming this batch.
+			errCh <- err
 			return err
 		}
-		rows = rows[:0]
+		rows = make([]CHPointRow, 0, batchSize)
 		return nil
 	}
 
 	for i, p := range sorted {
-		ext := remap[i]
-		orig := byExt[ext]
-		metaStr := map[string]string{}
-		if orig != nil {
-			for k, v := range orig.Metadata {
-				metaStr[k] = fmt.Sprintf("%v", v)
-			}
-		}
+		orig := &original[remap[i]]
+		metaStr := stringifyMeta(orig.Metadata)
 		// unproject from MaxZoom pixel space back to lng/lat for storage.
 		ll := sc.unprojectFast(p.X, p.Y, sc.Options.MaxZoom)
-		var metrics map[string]float32
-		if orig != nil {
-			metrics = orig.Metrics
-		}
 		rows = append(rows, CHPointRow{
 			ClusterID:  sc.clusterID,
 			ID:         p.ID, // internal id (already remapped)
-			ExternalID: ext,
+			ExternalID: orig.ID,
 			X:          ll[0],
 			Y:          ll[1],
-			Metrics:    metrics,
+			Metrics:    orig.Metrics,
 			Metadata:   metaStr,
 		})
 		if len(rows) >= batchSize {
@@ -269,7 +335,11 @@ func (sc *Supercluster) insertToCH(ctx context.Context, sorted []KDPoint, remap 
 			}
 		}
 	}
-	return flush()
+	if err := flush(); err != nil {
+		return err
+	}
+	close(sendCh)
+	return <-errCh
 }
 
 
