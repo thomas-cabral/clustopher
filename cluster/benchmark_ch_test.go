@@ -9,6 +9,22 @@ import (
 	"testing"
 )
 
+// viewportForZoom returns a realistic viewport for the given zoom level.
+// Low zooms = continental/CONUS view; high zooms = city-scale.
+func viewportForZoom(zoom int) KDBounds {
+	switch {
+	case zoom <= 4:
+		// Full CONUS (matches dataset extent).
+		return KDBounds{MinX: -125, MinY: 25, MaxX: -65, MaxY: 49}
+	case zoom <= 10:
+		// ~5° × 5° region (state-scale).
+		return KDBounds{MinX: -100, MinY: 37, MaxX: -95, MaxY: 42}
+	default:
+		// ~0.05° × 0.05° (neighborhood / city block).
+		return KDBounds{MinX: -100.025, MinY: 39.475, MaxX: -99.975, MaxY: 39.525}
+	}
+}
+
 func benchmarkClusteringCHHuge(b *testing.B, numPoints int, zoom int) {
 	dsn := os.Getenv("CLICKHOUSE_DSN")
 	if dsn == "" {
@@ -44,7 +60,7 @@ func benchmarkClusteringCHHuge(b *testing.B, numPoints int, zoom int) {
 		_ = c.Conn().Exec(ctx, "OPTIMIZE TABLE clustopher.rollup_z"+strconv.Itoa(z)+" PARTITION ? FINAL", clusterID)
 	}
 
-	bounds := KDBounds{MinX: -125, MinY: 25, MaxX: -65, MaxY: 49}
+	bounds := viewportForZoom(zoom)
 
 	var before, after runtime.MemStats
 	runtime.GC()
