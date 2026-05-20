@@ -65,6 +65,11 @@ func expandPerZoom(template string) []string {
 	return out
 }
 
+// splitStatements splits a SQL script on ';' after stripping '-- ' line comments.
+//
+// LIMITATION: this is not a full SQL tokenizer. It does NOT handle string
+// literals or block comments containing ';'. Keep migration files free of
+// such constructs (current usage: DDL only, no DML, no string literals).
 func splitStatements(script string) []string {
 	// Strip comment lines before splitting, to avoid semicolons inside comments
 	// being treated as statement delimiters.

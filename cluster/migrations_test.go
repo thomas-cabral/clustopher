@@ -59,4 +59,15 @@ func TestRunMigrations_CreatesTables(t *testing.T) {
 			t.Fatalf("expected rollup_z%d to exist", z)
 		}
 	}
+
+	for z := 2; z <= 16; z++ {
+		var c uint64
+		q := "SELECT count() FROM system.tables WHERE database='clustopher' AND name=?"
+		if err := conn.QueryRow(context.Background(), q, "mv_rollup_z"+strconv.Itoa(z)).Scan(&c); err != nil {
+			t.Fatalf("scan mv_rollup_z%d: %v", z, err)
+		}
+		if c != 1 {
+			t.Fatalf("expected mv_rollup_z%d to exist", z)
+		}
+	}
 }
