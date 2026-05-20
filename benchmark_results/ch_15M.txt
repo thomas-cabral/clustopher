@@ -1,0 +1,15 @@
+Loading 15000000 points
+Loading 15000000 points
+goos: linux
+goarch: amd64
+pkg: web/clustopher/cluster
+cpu: AMD Ryzen 9 5900X 12-Core Processor            
+BenchmarkClusteringCHHuge_LowZoom-24     	       1	   3286646 ns/op	         0.1252 MB/op	  131280 B/op	    1037 allocs/op
+Loading 15000000 points
+Loading 15000000 points
+BenchmarkClusteringCHHuge_MidZoom-24     	       1	   7378261 ns/op	         3.387 MB/op	 3551976 B/op	   44478 allocs/op
+Loading 15000000 points
+Loading 15000000 points
+BenchmarkClusteringCHHuge_HighZoom-24    	       1	  59692885 ns/op	         0.09214 MB/op	   96616 B/op	     498 allocs/op
+PASS
+ok  	web/clustopher/cluster	540.611s

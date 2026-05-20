@@ -120,7 +120,25 @@ CLICKHOUSE_DSN=clickhouse://default:@localhost:9000/clustopher_test go test ./..
 
 ### Performance Characteristics
 
-TBD — updated post-15M-point benchmark; see `benchmark_results/ch_15M.txt` once available.
+Measured on AMD Ryzen 9 5900X (24 threads), single-node ClickHouse 24.8 in Docker, 15,000,000 random points across the CONUS bounding box. Viewports are zoom-appropriate (continental at low zoom, neighborhood at high zoom):
+
+| Zoom | Viewport          | `GetClusters` | Heap alloc / op |
+|------|-------------------|---------------|-----------------|
+| 2    | CONUS (60° × 24°) | **3.3 ms**    | 0.13 MB         |
+| 8    | State (5° × 5°)   | **7.4 ms**    | 3.4 MB          |
+| 14   | City (0.05° × 0.05°) | **59.7 ms** | 0.09 MB         |
+
+Comparison to the pre-ClickHouse baseline (in-memory KD-tree + grid clustering, full CONUS bbox at every zoom — see `benchmark_results/baseline_15M.txt`):
+
+| Zoom | Old (full bbox) | New (zoom-appropriate viewport) | Speedup |
+|------|-----------------|---------------------------------|---------|
+| 2    | 30.35 s         | 3.3 ms                          | ~9 200× |
+| 8    | 18.19 s         | 7.4 ms                          | ~2 460× |
+| 14   | 67.42 s         | 59.7 ms                         | ~1 130× |
+
+Note: the two columns are not strictly apples-to-apples — the old benchmarks always queried the full CONUS bbox, which is unrealistic at z14 where a real viewport is one neighborhood. With zoom-appropriate viewports the new system stays interactive across the entire zoom range.
+
+Raw results: `benchmark_results/ch_15M.txt`.
 
 ### Limitations
 - Single-node ClickHouse only; no distributed CH support
