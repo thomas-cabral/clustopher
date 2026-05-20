@@ -620,26 +620,7 @@ func (sc *Supercluster) Load(points []Point) error {
 	sc.Tree = sc.buildKDTree(kdPoints)
 	sc.Points = points
 
-	// Build skeleton with id remap (internal leaf-order ids 1..N).
-	projected := make([]KDPoint, len(points))
-	for i, p := range points {
-		proj := sc.projectFast(p.X, p.Y, sc.Options.MaxZoom)
-		projected[i] = KDPoint{ID: p.ID, X: proj[0], Y: proj[1], NumPoints: 1}
-	}
-	sorted := SortPointsIntoLeafOrder(projected, sc.Options.NodeSize)
-	tree, remap := BuildSkeletonWithRemap(sorted, sc.Options.NodeSize)
-	sc.Skeleton = tree
-
-	// If CH client is configured, insert rows in internal-id order.
-	if sc.ch != nil {
-		if sc.clusterID == "" {
-			return fmt.Errorf("CH client set but clusterID empty; call SetClusterID first")
-		}
-		if err := sc.insertToCH(context.Background(), sorted, remap, points); err != nil {
-			return fmt.Errorf("insert to CH: %w", err)
-		}
-	}
-	return nil
+	return sc.buildSkeletonAndPersist(points)
 }
 
 // loadBatched processes points in batches to reduce memory usage
@@ -691,8 +672,14 @@ func (sc *Supercluster) loadBatched(points []Point, batchSize int) error {
 
 	sc.Points = points
 
-	// Build skeleton with id remap (internal leaf-order ids 1..N).
-	projected := make([]KDPoint, numPoints)
+	return sc.buildSkeletonAndPersist(points)
+}
+
+// buildSkeletonAndPersist projects points to MaxZoom, sorts into leaf order,
+// builds the skeleton with sequential internal ids, and (if a CH client is
+// configured) inserts the points to CH in leaf-order id order.
+func (sc *Supercluster) buildSkeletonAndPersist(points []Point) error {
+	projected := make([]KDPoint, len(points))
 	for i, p := range points {
 		proj := sc.projectFast(p.X, p.Y, sc.Options.MaxZoom)
 		projected[i] = KDPoint{ID: p.ID, X: proj[0], Y: proj[1], NumPoints: 1}
@@ -701,7 +688,6 @@ func (sc *Supercluster) loadBatched(points []Point, batchSize int) error {
 	tree, remap := BuildSkeletonWithRemap(sorted, sc.Options.NodeSize)
 	sc.Skeleton = tree
 
-	// If CH client is configured, insert rows in internal-id order.
 	if sc.ch != nil {
 		if sc.clusterID == "" {
 			return fmt.Errorf("CH client set but clusterID empty; call SetClusterID first")
