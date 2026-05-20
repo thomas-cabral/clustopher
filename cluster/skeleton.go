@@ -132,3 +132,86 @@ func unionBounds(a, b KDBounds) KDBounds {
 	}
 	return out
 }
+
+// SortPointsIntoLeafOrder reorders a slice of points such that consecutive
+// chunks of nodeSize are valid KD-tree leaves (i.e. each chunk is spatially
+// localized). Sort is in-place on a copy and returns the result. Uses the
+// same median-partition strategy as buildKDTree.
+func SortPointsIntoLeafOrder(points []KDPoint, nodeSize int) []KDPoint {
+	if nodeSize < 1 {
+		nodeSize = 1
+	}
+	out := make([]KDPoint, len(points))
+	copy(out, points)
+	sortRecursive(out, 0, len(out)-1, 0, nodeSize)
+	return out
+}
+
+func sortRecursive(pts []KDPoint, lo, hi, axis, nodeSize int) {
+	if hi-lo+1 <= nodeSize {
+		return
+	}
+	mid := (lo + hi) / 2
+	if axis == 0 {
+		quickselectX(pts, lo, hi, mid)
+	} else {
+		quickselectY(pts, lo, hi, mid)
+	}
+	nextAxis := axis ^ 1
+	sortRecursive(pts, lo, mid-1, nextAxis, nodeSize)
+	sortRecursive(pts, mid+1, hi, nextAxis, nodeSize)
+}
+
+func quickselectX(pts []KDPoint, lo, hi, k int) {
+	for lo < hi {
+		pivot := pts[(lo+hi)/2].X
+		i, j := lo, hi
+		for i <= j {
+			for pts[i].X < pivot {
+				i++
+			}
+			for pts[j].X > pivot {
+				j--
+			}
+			if i <= j {
+				pts[i], pts[j] = pts[j], pts[i]
+				i++
+				j--
+			}
+		}
+		if k <= j {
+			hi = j
+		} else if k >= i {
+			lo = i
+		} else {
+			return
+		}
+	}
+}
+
+func quickselectY(pts []KDPoint, lo, hi, k int) {
+	for lo < hi {
+		pivot := pts[(lo+hi)/2].Y
+		i, j := lo, hi
+		for i <= j {
+			for pts[i].Y < pivot {
+				i++
+			}
+			for pts[j].Y > pivot {
+				j--
+			}
+			if i <= j {
+				pts[i], pts[j] = pts[j], pts[i]
+				i++
+				j--
+			}
+		}
+		if k <= j {
+			hi = j
+		} else if k >= i {
+			lo = i
+		} else {
+			return
+		}
+	}
+}

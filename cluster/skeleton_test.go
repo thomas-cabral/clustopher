@@ -50,3 +50,25 @@ func TestBuildSkeleton_CountSumsToTotal(t *testing.T) {
 		t.Fatalf("count sum = %d, want 1000", total)
 	}
 }
+
+func TestSortPointsIntoLeafOrder_DeterministicLeaves(t *testing.T) {
+	pts := []KDPoint{
+		{ID: 1, X: 0, Y: 0}, {ID: 2, X: 10, Y: 10},
+		{ID: 3, X: 1, Y: 1}, {ID: 4, X: 11, Y: 11},
+		{ID: 5, X: 0, Y: 10}, {ID: 6, X: 10, Y: 0},
+		{ID: 7, X: 1, Y: 11}, {ID: 8, X: 11, Y: 1},
+	}
+	sorted := SortPointsIntoLeafOrder(pts, 2)
+	if len(sorted) != 8 {
+		t.Fatalf("len = %d", len(sorted))
+	}
+	full := boundsOver(pts)
+	fullArea := (full.MaxX - full.MinX) * (full.MaxY - full.MinY)
+	for i := 0; i < 8; i += 2 {
+		leafBounds := boundsOver(sorted[i : i+2])
+		area := (leafBounds.MaxX - leafBounds.MinX) * (leafBounds.MaxY - leafBounds.MinY)
+		if area > 0.5*fullArea {
+			t.Errorf("leaf %d covers >50%% of full bbox (area=%f, full=%f)", i/2, area, fullArea)
+		}
+	}
+}
