@@ -76,14 +76,18 @@
                 const errorData = await response.json();
                 throw new Error(errorData.error || 'Failed to create cluster');
             }
-            
+
+            const created: { id?: string } = await response.json();
             console.log('Cluster created, waiting before refresh...');
             // Give the server a moment to initialize the new cluster
             await new Promise(resolve => setTimeout(resolve, 1000));
-            
+
             console.log('Refreshing cluster list...');
             await loadClusters();
             dispatch('clusterCreated');
+            if (created?.id) {
+                handleSetClusterId(created.id);
+            }
             console.log('Cluster creation complete');
         } catch (err: unknown) {
             error = err instanceof Error ? err.message : 'Unknown error occurred';
