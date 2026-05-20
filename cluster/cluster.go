@@ -284,17 +284,6 @@ func (sc *Supercluster) CleanupCluster() {
 	debug.FreeOSMemory()
 }
 
-// GetClusters returns clusters for the given bounds and zoom level.
-// Phase 4: delegates to the ClickHouse-backed path.
-func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
-	clusters, err := sc.GetClustersCH(context.Background(), bounds, zoom)
-	if err != nil {
-		fmt.Printf("GetClusters: %v\n", err)
-		return nil
-	}
-	return clusters
-}
-
 
 // projectFast converts lng/lat to tile coordinates
 func (sc *Supercluster) projectFast(lng, lat float32, zoom int) [2]float32 {
@@ -528,7 +517,10 @@ func (sc *Supercluster) createSinglePointCluster(p KDPoint) ClusterNode {
 // ToGeoJSON converts clusters to GeoJSON format
 func (sc *Supercluster) ToGeoJSON(bounds KDBounds, zoom int) (*FeatureCollection, error) {
 	// Get clusters for the given bounds and zoom level
-	clusters := sc.GetClusters(bounds, zoom)
+	clusters, err := sc.GetClustersCH(context.Background(), bounds, zoom)
+	if err != nil {
+		return nil, err
+	}
 
 	// Convert clusters to GeoJSON features
 	features := make([]Feature, len(clusters))

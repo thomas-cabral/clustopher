@@ -209,14 +209,20 @@ func TestGetClusters(t *testing.T) {
 	// Test at low zoom (should cluster some points).
 	// The CH-backed path clusters points 2 and 3 together (they are very close),
 	// while point 1 and point 4 remain as singletons — yielding 3 results total.
-	clusters := sc.GetClusters(bounds, 5)
+	clusters, err := sc.GetClustersCH(context.Background(), bounds, 5)
+	if err != nil {
+		t.Fatalf("GetClustersCH zoom=5: %v", err)
+	}
 
 	if len(clusters) != 3 {
 		t.Errorf("Expected 3 results at zoom 5 (1 cluster + 2 singletons), got %d", len(clusters))
 	}
 
 	// Test at high zoom (should not cluster)
-	clusters = sc.GetClusters(bounds, 15)
+	clusters, err = sc.GetClustersCH(context.Background(), bounds, 15)
+	if err != nil {
+		t.Fatalf("GetClustersCH zoom=15: %v", err)
+	}
 
 	// Should have all individual points
 	if len(clusters) != 4 {

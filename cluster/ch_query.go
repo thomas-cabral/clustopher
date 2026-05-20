@@ -63,6 +63,9 @@ func (sc *Supercluster) queryRollup(ctx context.Context, viewport KDBounds, zoom
 		if err := rows.Scan(&tileX, &tileY, &cnt, &sumX, &sumY, &metricSums, &metricCnts); err != nil {
 			return nil, fmt.Errorf("scan rollup row: %w", err)
 		}
+		if cnt == 0 {
+			continue
+		}
 		cx := float32(sumX / float64(cnt))
 		cy := float32(sumY / float64(cnt))
 		metrics := make(map[string]float32, len(metricSums))

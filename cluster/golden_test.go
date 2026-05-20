@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -45,7 +46,10 @@ func TestGoldenSnapshots(t *testing.T) {
 		if err := sc.Load(points); err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		clusters := sc.GetClusters(goldenBounds, c.zoom)
+		clusters, err := sc.GetClustersCH(context.Background(), goldenBounds, c.zoom)
+		if err != nil {
+			t.Fatalf("GetClustersCH n=%d z=%d: %v", c.n, c.zoom, err)
+		}
 
 		path := filepath.Join("testdata/golden", fmt.Sprintf("n%d_z%d.json", c.n, c.zoom))
 		f, err := os.Create(path)

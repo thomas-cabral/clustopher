@@ -65,16 +65,46 @@ func (r *ClusterRunner) cleanupInactiveClusters() {
 }
 
 // loadClusterIfNeeded ensures the cluster skeleton is in memory, opening it
-// from CH if it was evicted or never loaded in this process. Returns an error
-// if the cluster_id doesn't exist in CH.
-func (r *ClusterRunner) loadClusterIfNeeded(ctx context.Context, id string) error {
+// from CH if it was evicted or never loaded in this process. Returns the
+// *Supercluster so callers never need to re-look-up the pointer (avoiding
+// a TOCTOU race where an LRU eviction could occur between load and use).
+func (r *ClusterRunner) loadClusterIfNeeded(ctx context.Context, id string) (*cluster.Supercluster, error) {
+	// Fast path: already in memory.
+	r.clusterLock.Lock()
+	if sc, exists := r.clusters[id]; exists {
+		r.lastAccessed[id] = time.Now()
+		r.clusterLock.Unlock()
+		return sc, nil
+	}
+	r.clusterLock.Unlock()
+
+	// Slow path: build skeleton from CH outside the lock so we don't hold it
+	// during a potentially long network call.
+	sc := cluster.NewSupercluster(cluster.SuperclusterOptions{
+		MinZoom:   0,
+		MaxZoom:   16,
+		MinPoints: 2,
+		Radius:    100,
+		Extent:    512,
+		NodeSize:  64,
+	})
+	sc.SetCHClient(r.ch)
+	sc.SetClusterID(id)
+
+	if err := sc.Open(ctx); err != nil {
+		return nil, fmt.Errorf("open cluster %s from CH: %w", id, err)
+	}
+
+	// Re-acquire write lock to insert. Double-check in case a concurrent
+	// request already loaded the same cluster while we were in Open().
 	r.clusterLock.Lock()
 	defer r.clusterLock.Unlock()
 
-	// Update access time if skeleton is already in memory.
-	if _, exists := r.clusters[id]; exists {
+	if existing, exists := r.clusters[id]; exists {
+		// Another goroutine won the race; discard our copy and use theirs.
+		sc.CleanupCluster()
 		r.lastAccessed[id] = time.Now()
-		return nil
+		return existing, nil
 	}
 
 	// Evict LRU entry if we're at capacity.
@@ -98,25 +128,9 @@ func (r *ClusterRunner) loadClusterIfNeeded(ctx context.Context, id string) erro
 		}
 	}
 
-	// Rebuild skeleton from CH.
-	sc := cluster.NewSupercluster(cluster.SuperclusterOptions{
-		MinZoom:   0,
-		MaxZoom:   16,
-		MinPoints: 2,
-		Radius:    100,
-		Extent:    512,
-		NodeSize:  64,
-	})
-	sc.SetCHClient(r.ch)
-	sc.SetClusterID(id)
-
-	if err := sc.Open(ctx); err != nil {
-		return fmt.Errorf("open cluster %s from CH: %w", id, err)
-	}
-
 	r.clusters[id] = sc
 	r.lastAccessed[id] = time.Now()
-	return nil
+	return sc, nil
 }
 
 func (r *ClusterRunner) CreateCluster(ctx context.Context, req *pb.CreateClusterRequest) (*pb.CreateClusterResponse, error) {
@@ -196,7 +210,7 @@ func (r *ClusterRunner) ListClusters(ctx context.Context, req *pb.ListClustersRe
 }
 
 func (r *ClusterRunner) LoadCluster(ctx context.Context, req *pb.LoadClusterRequest) (*pb.LoadClusterResponse, error) {
-	if err := r.loadClusterIfNeeded(ctx, req.ClusterId); err != nil {
+	if _, err := r.loadClusterIfNeeded(ctx, req.ClusterId); err != nil {
 		return nil, err
 	}
 
@@ -219,13 +233,10 @@ func (r *ClusterRunner) LoadCluster(ctx context.Context, req *pb.LoadClusterRequ
 }
 
 func (r *ClusterRunner) GetClusters(ctx context.Context, req *pb.GetClustersRequest) (*pb.GetClustersResponse, error) {
-	if err := r.loadClusterIfNeeded(ctx, req.ClusterId); err != nil {
+	sc, err := r.loadClusterIfNeeded(ctx, req.ClusterId)
+	if err != nil {
 		return nil, err
 	}
-
-	r.clusterLock.RLock()
-	sc := r.clusters[req.ClusterId]
-	r.clusterLock.RUnlock()
 
 	bounds := cluster.KDBounds{
 		MinX: req.Bounds.MinX,
@@ -234,7 +245,10 @@ func (r *ClusterRunner) GetClusters(ctx context.Context, req *pb.GetClustersRequ
 		MaxY: req.Bounds.MaxY,
 	}
 
-	clusters := sc.GetClusters(bounds, int(req.Zoom))
+	clusters, err := sc.GetClustersCH(ctx, bounds, int(req.Zoom))
+	if err != nil {
+		return nil, fmt.Errorf("get clusters: %w", err)
+	}
 
 	features := make([]*pb.ClusterFeature, len(clusters))
 	for i, c := range clusters {
@@ -252,13 +266,10 @@ func (r *ClusterRunner) GetClusters(ctx context.Context, req *pb.GetClustersRequ
 }
 
 func (r *ClusterRunner) GetMetadata(ctx context.Context, req *pb.GetMetadataRequest) (*pb.GetMetadataResponse, error) {
-	if err := r.loadClusterIfNeeded(ctx, req.ClusterId); err != nil {
+	sc, err := r.loadClusterIfNeeded(ctx, req.ClusterId)
+	if err != nil {
 		return nil, err
 	}
-
-	r.clusterLock.RLock()
-	sc := r.clusters[req.ClusterId]
-	r.clusterLock.RUnlock()
 
 	bounds := cluster.KDBounds{
 		MinX: req.Bounds.MinX,
@@ -267,7 +278,10 @@ func (r *ClusterRunner) GetMetadata(ctx context.Context, req *pb.GetMetadataRequ
 		MaxY: req.Bounds.MaxY,
 	}
 
-	clusters := sc.GetClusters(bounds, int(req.Zoom))
+	clusters, err := sc.GetClustersCH(ctx, bounds, int(req.Zoom))
+	if err != nil {
+		return nil, fmt.Errorf("get clusters: %w", err)
+	}
 	summary := cluster.CalculateMetadataSummary(clusters)
 
 	// Convert metricsSummary
