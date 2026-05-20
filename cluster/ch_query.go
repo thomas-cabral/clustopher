@@ -124,11 +124,15 @@ func (sc *Supercluster) queryTree(ctx context.Context, viewport KDBounds, zoom i
 	out := make([]ClusterNode, 0, len(leafIdxs))
 
 	if len(inside) > 0 {
-		agg, err := sc.aggregateLeaves(ctx, inside)
+		agg, skipped, err := sc.aggregateLeaves(ctx, inside)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, agg...)
+		// Inside leaves with cnt < MinPoints fall through to the partial path so
+		// their points are emitted individually (or aggregated with overlapping
+		// partial-leaf neighbors).
+		partial = append(partial, skipped...)
 	}
 
 	if len(partial) > 0 {
@@ -148,9 +152,12 @@ func (sc *Supercluster) queryTree(ctx context.Context, viewport KDBounds, zoom i
 
 // aggregateLeaves emits one ClusterNode per inside leaf by aggregating across
 // each leaf's id range in CH. One round-trip via UNION ALL of per-leaf SELECTs.
-func (sc *Supercluster) aggregateLeaves(ctx context.Context, leaves []int32) ([]ClusterNode, error) {
+// Leaves whose point count falls below MinPoints are returned in skipped so the
+// caller can route them through the partial-leaf path (fetchLeafPoints +
+// clusterPoints) to avoid silently dropping their points.
+func (sc *Supercluster) aggregateLeaves(ctx context.Context, leaves []int32) (clusters []ClusterNode, skipped []int32, err error) {
 	if len(leaves) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	parts := make([]string, 0, len(leaves))
 	args := []interface{}{}
@@ -168,11 +175,12 @@ func (sc *Supercluster) aggregateLeaves(ctx context.Context, leaves []int32) ([]
 	q := joinUnion(parts)
 	rows, err := sc.ch.Conn().Query(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("aggregate leaves: %w", err)
+		return nil, nil, fmt.Errorf("aggregate leaves: %w", err)
 	}
 	defer rows.Close()
 
 	out := make([]ClusterNode, 0, len(leaves))
+	var skip []int32
 	var (
 		leafIdx int32
 		cnt     uint64
@@ -182,9 +190,10 @@ func (sc *Supercluster) aggregateLeaves(ctx context.Context, leaves []int32) ([]
 	)
 	for rows.Next() {
 		if err := rows.Scan(&leafIdx, &cnt, &cx, &cy, &msum, &mcnt); err != nil {
-			return nil, fmt.Errorf("scan agg row: %w", err)
+			return nil, nil, fmt.Errorf("scan agg row: %w", err)
 		}
 		if cnt < uint64(sc.Options.MinPoints) {
+			skip = append(skip, leafIdx)
 			continue
 		}
 		metrics := make(map[string]float32, len(msum))
@@ -201,7 +210,7 @@ func (sc *Supercluster) aggregateLeaves(ctx context.Context, leaves []int32) ([]
 			Metrics: metrics,
 		})
 	}
-	return out, rows.Err()
+	return out, skip, rows.Err()
 }
 
 func joinUnion(parts []string) string {
