@@ -72,3 +72,25 @@ func TestSortPointsIntoLeafOrder_DeterministicLeaves(t *testing.T) {
 		}
 	}
 }
+
+func TestRangeLeaves_ReturnsIntersectingOnly(t *testing.T) {
+	pts := []KDPoint{
+		{ID: 1, X: 0, Y: 0}, {ID: 2, X: 1, Y: 1},
+		{ID: 3, X: 100, Y: 100}, {ID: 4, X: 101, Y: 101},
+	}
+	sorted := SortPointsIntoLeafOrder(pts, 2)
+	tree := BuildSkeleton(sorted, 2)
+
+	leaves := tree.RangeLeaves(KDBounds{MinX: -1, MinY: -1, MaxX: 2, MaxY: 2})
+	if len(leaves) != 1 {
+		t.Fatalf("got %d leaves, want 1", len(leaves))
+	}
+	if tree.Leaves[leaves[0]].Count != 2 {
+		t.Fatalf("wrong leaf returned")
+	}
+
+	all := tree.RangeLeaves(KDBounds{MinX: -1, MinY: -1, MaxX: 200, MaxY: 200})
+	if len(all) != 2 {
+		t.Fatalf("got %d leaves, want 2", len(all))
+	}
+}

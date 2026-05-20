@@ -215,3 +215,37 @@ func quickselectY(pts []KDPoint, lo, hi, k int) {
 		}
 	}
 }
+
+// RangeLeaves returns leaf indexes whose bounds intersect the given viewport.
+// Walks the tree depth-first from the root (last node, since BuildSkeleton
+// emits the root last).
+func (t *SkeletonTree) RangeLeaves(viewport KDBounds) []int32 {
+	if len(t.Nodes) == 0 {
+		return nil
+	}
+	out := make([]int32, 0, 32)
+	var walk func(nodeIdx int32)
+	walk = func(nodeIdx int32) {
+		n := &t.Nodes[nodeIdx]
+		if !intersects(n.Bounds, viewport) {
+			return
+		}
+		if n.LeafIdx >= 0 {
+			out = append(out, n.LeafIdx)
+			return
+		}
+		if n.Left >= 0 {
+			walk(n.Left)
+		}
+		if n.Right >= 0 {
+			walk(n.Right)
+		}
+	}
+	walk(int32(len(t.Nodes) - 1))
+	return out
+}
+
+func intersects(a, b KDBounds) bool {
+	return a.MinX <= b.MaxX && a.MaxX >= b.MinX &&
+		a.MinY <= b.MaxY && a.MaxY >= b.MinY
+}
