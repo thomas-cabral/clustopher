@@ -3,6 +3,8 @@ package runner
 import (
 	"context"
 	"fmt"
+	"runtime"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -84,7 +86,7 @@ func (r *ClusterRunner) loadClusterIfNeeded(ctx context.Context, id string) (*cl
 		MinZoom:   0,
 		MaxZoom:   16,
 		MinPoints: 2,
-		Radius:    100,
+		Radius:    40,
 		Extent:    512,
 		NodeSize:  64,
 	})
@@ -149,10 +151,13 @@ func (r *ClusterRunner) CreateCluster(ctx context.Context, req *pb.CreateCluster
 		MinZoom:   0,
 		MaxZoom:   16,
 		MinPoints: 2,
-		Radius:    100,
-		Extent:    512,
-		NodeSize:  64,
-		Log:       true,
+		// Must match the /40 scaling baked into migrations/002_rollup_template.sql
+		// — queryRollup uses Options.Radius to derive the tile range, and any
+		// other value will pick wrong tiles from the MV.
+		Radius:   40,
+		Extent:   512,
+		NodeSize: 64,
+		Log:      true,
 	}
 
 	id := uuid.New().String()[:8]
@@ -164,6 +169,13 @@ func (r *ClusterRunner) CreateCluster(ctx context.Context, req *pb.CreateCluster
 	if err := sc.Load(points); err != nil {
 		return nil, fmt.Errorf("failed to load points: %v", err)
 	}
+
+	// Release the 15M-point source slice + force the runtime to hand pages
+	// back to the OS. Without this RSS stays pinned at the Load high-water
+	// mark for the lifetime of the runner — Skeleton itself is tiny.
+	points = nil
+	runtime.GC()
+	debug.FreeOSMemory()
 
 	r.clusterLock.Lock()
 	r.clusters[id] = sc
