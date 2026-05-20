@@ -10,7 +10,6 @@ import (
 	"sort"
 
 	"sync"
-	"time"
 )
 
 // Global string interning pool to deduplicate strings
@@ -967,95 +966,14 @@ func (sc *Supercluster) CleanupCluster() {
 	debug.FreeOSMemory()
 }
 
-// GetClusters returns clusters for the given bounds and zoom level
+// GetClusters returns clusters for the given bounds and zoom level.
+// Phase 4: delegates to the ClickHouse-backed path.
 func (sc *Supercluster) GetClusters(bounds KDBounds, zoom int) []ClusterNode {
-	if sc == nil {
+	clusters, err := sc.GetClustersCH(context.Background(), bounds, zoom)
+	if err != nil {
+		fmt.Printf("GetClusters: %v\n", err)
 		return nil
 	}
-
-	startTime := time.Now()
-
-	if sc.Options.Log {
-		fmt.Printf("Getting clusters for zoom level %d\n", zoom)
-		fmt.Printf("Bounds: MinX: %f, MinY: %f, MaxX: %f, MaxY: %f\n",
-			bounds.MinX, bounds.MinY, bounds.MaxX, bounds.MaxY)
-	}
-
-	if sc.Tree == nil || len(sc.Tree.Points) == 0 {
-		if sc.Options.Log {
-			fmt.Printf("No points in tree\n")
-		}
-		return nil
-	}
-
-	if sc.Options.Log {
-		fmt.Printf("Total points in tree: %d\n", len(sc.Tree.Points))
-	}
-
-	// Get a slice from the pool for points
-	pointsPtr := pointSlicePool.Get().(*[]KDPoint)
-	points := (*pointsPtr)[:0] // Reset length but keep capacity
-	defer pointSlicePool.Put(pointsPtr)
-
-	// Pre-calculate projection for bounds
-	minP := sc.projectFast(bounds.MinX, bounds.MaxY, zoom)
-	maxP := sc.projectFast(bounds.MaxX, bounds.MinY, zoom)
-
-	// Create search bounds
-	searchBounds := KDBounds{
-		MinX: minP[0],
-		MinY: minP[1],
-		MaxX: maxP[0],
-		MaxY: maxP[1],
-	}
-
-	// Find points in viewport
-	filterTime := time.Now()
-	points = sc.findPointsInViewport(searchBounds, zoom, points)
-	if sc.Options.Log {
-		fmt.Printf("Found %d points in %.2fms\n",
-			len(points), float64(time.Since(filterTime).Milliseconds()))
-	}
-
-	if len(points) == 0 {
-		return nil
-	}
-
-	// Estimate clusters and create result array
-	estimatedClusters := min(len(points), max(10, len(points)/10))
-	clusters := make([]ClusterNode, 0, estimatedClusters)
-
-	// Cluster points
-	clusterTime := time.Now()
-	// Determine clustering method based on zoom level and point count
-	// Use grid-based clustering for:
-	// 1. Large datasets (>50000 points)
-	// 2. Medium datasets (>10000 points) at lower zoom levels (<MaxZoom/2)
-	// 3. Any dataset at very low zoom levels (<MaxZoom/4)
-	useGridClustering := len(points) > 50000 ||
-		(len(points) > 10000 && zoom < sc.Options.MaxZoom/2) ||
-		zoom < sc.Options.MaxZoom/4
-
-	if useGridClustering {
-		clusters = append(clusters, sc.clusterPointsWithGrid(points, float32(sc.Options.Radius), zoom)...)
-	} else {
-		clusters = append(clusters, sc.clusterPoints(points, float32(sc.Options.Radius))...)
-	}
-	if sc.Options.Log {
-		fmt.Printf("Clustering created %d clusters in %.2fms\n",
-			len(clusters), float64(time.Since(clusterTime).Milliseconds()))
-	}
-
-	// Convert back to lng/lat
-	unprojTime := time.Now()
-	sc.unprojectClusters(clusters, zoom)
-	if sc.Options.Log {
-		fmt.Printf("Unprojection completed in %.2fms\n",
-			float64(time.Since(unprojTime).Milliseconds()))
-		fmt.Printf("Total processing time: %.2fms\n",
-			float64(time.Since(startTime).Milliseconds()))
-	}
-
 	return clusters
 }
 

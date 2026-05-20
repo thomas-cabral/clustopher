@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -12,6 +13,37 @@ import (
 	"testing"
 	"time"
 )
+
+func newTestSupercluster(t *testing.T, clusterID string, opts SuperclusterOptions) *Supercluster {
+	t.Helper()
+	dsn := os.Getenv("CLICKHOUSE_DSN")
+	if dsn == "" {
+		t.Skip("CLICKHOUSE_DSN not set")
+	}
+	ctx := context.Background()
+	c, err := NewCHClient(ctx, CHConfig{DSN: dsn})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	if err := RunMigrations(ctx, c.Conn(), "migrations"); err != nil {
+		t.Fatalf("migrations: %v", err)
+	}
+	_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.points DROP PARTITION ?", clusterID)
+	for z := 2; z <= 16; z++ {
+		_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.rollup_z"+strconv.Itoa(z)+" DROP PARTITION ?", clusterID)
+	}
+	sc := NewSupercluster(opts)
+	sc.SetCHClient(c)
+	sc.SetClusterID(clusterID)
+	t.Cleanup(func() {
+		_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.points DROP PARTITION ?", clusterID)
+		for z := 2; z <= 16; z++ {
+			_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.rollup_z"+strconv.Itoa(z)+" DROP PARTITION ?", clusterID)
+		}
+		c.Close()
+	})
+	return sc
+}
 
 func TestClusterMetricsRollup(t *testing.T) {
 	// Create a new supercluster with our metrics and metadata stores
@@ -473,15 +505,15 @@ func TestProjectionRoundTrip(t *testing.T) {
 }
 
 func TestGetClusters(t *testing.T) {
-	// Create a test supercluster
-	sc := NewSupercluster(SuperclusterOptions{
+	opts := SuperclusterOptions{
 		MinZoom:   0,
 		MaxZoom:   16,
 		MinPoints: 2,
 		Radius:    40,
 		Extent:    512,
 		NodeSize:  64,
-	})
+	}
+	sc := newTestSupercluster(t, "TEST_GetClusters", opts)
 
 	// Create test points in Continental US
 	testPoints := []Point{
@@ -504,12 +536,13 @@ func TestGetClusters(t *testing.T) {
 		MaxY: 50.0,
 	}
 
-	// Test at low zoom (should cluster)
+	// Test at low zoom (should cluster some points).
+	// The CH-backed path clusters points 2 and 3 together (they are very close),
+	// while point 1 and point 4 remain as singletons — yielding 3 results total.
 	clusters := sc.GetClusters(bounds, 5)
 
-	// Should have 2 clusters: one for the 3 close points and one for the far point
-	if len(clusters) != 2 {
-		t.Errorf("Expected 2 clusters at zoom 5, got %d", len(clusters))
+	if len(clusters) != 3 {
+		t.Errorf("Expected 3 results at zoom 5 (1 cluster + 2 singletons), got %d", len(clusters))
 	}
 
 	// Test at high zoom (should not cluster)
