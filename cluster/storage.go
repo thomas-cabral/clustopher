@@ -99,94 +99,12 @@ func (sc *Supercluster) SaveCompressed(filename string) error {
 		progress.Update(end, numPoints)
 	}
 
-	// Serialize metadata store
-	progress.SetStage("Saving metadata")
-	sc.metadataStore.mu.RLock()
-	// Write key mapping
-	binary.Write(enc, binary.LittleEndian, uint32(len(sc.metadataStore.idToKey)))
-	for _, key := range sc.metadataStore.idToKey {
-		keyBytes := []byte(key)
-		binary.Write(enc, binary.LittleEndian, uint32(len(keyBytes)))
-		enc.Write(keyBytes)
-	}
-
-	// Write point metadata entries
-	binary.Write(enc, binary.LittleEndian, uint32(len(sc.metadataStore.pointMeta)))
-
-	// Process metadata in batches
-	metaCount := 0
-	for pointID, entries := range sc.metadataStore.pointMeta {
-		binary.Write(enc, binary.LittleEndian, pointID)
-		binary.Write(enc, binary.LittleEndian, uint32(len(entries)))
-
-		for _, entry := range entries {
-			binary.Write(enc, binary.LittleEndian, entry.Key)
-			binary.Write(enc, binary.LittleEndian, entry.Value.Type)
-
-			switch entry.Value.Type {
-			case 0: // string
-				strBytes := []byte(entry.Value.StringVal)
-				binary.Write(enc, binary.LittleEndian, uint32(len(strBytes)))
-				enc.Write(strBytes)
-			case 1: // number
-				binary.Write(enc, binary.LittleEndian, entry.Value.NumVal)
-			case 2: // bool
-				binary.Write(enc, binary.LittleEndian, entry.Value.BoolVal)
-			}
-		}
-
-		metaCount++
-		if metaCount%10000 == 0 {
-			progress.Update(metaCount, len(sc.metadataStore.pointMeta))
-		}
-	}
-	sc.metadataStore.mu.RUnlock()
-
-	// Serialize metrics store
-	progress.SetStage("Saving metrics")
-	sc.metricsStore.mu.RLock()
-	// Write keys
-	binary.Write(enc, binary.LittleEndian, uint32(len(sc.metricsStore.keys)))
-	for _, key := range sc.metricsStore.keys {
-		keyBytes := []byte(key)
-		binary.Write(enc, binary.LittleEndian, uint32(len(keyBytes)))
-		enc.Write(keyBytes)
-	}
-
-	// Write values by column
-	for i, col := range sc.metricsStore.columns {
-		binary.Write(enc, binary.LittleEndian, uint32(len(col)))
-
-		// Write column in chunks to avoid large memory allocations
-		chunkSize := 50000
-		for offset := 0; offset < len(col); offset += chunkSize {
-			end := offset + chunkSize
-			if end > len(col) {
-				end = len(col)
-			}
-
-			for _, val := range col[offset:end] {
-				binary.Write(enc, binary.LittleEndian, val)
-			}
-		}
-
-		progress.Update(i+1, len(sc.metricsStore.columns))
-	}
-
-	// Write point mapping
-	binary.Write(enc, binary.LittleEndian, uint32(len(sc.metricsStore.pointToRow)))
-
-	mappingCount := 0
-	for pointID, rowIdx := range sc.metricsStore.pointToRow {
-		binary.Write(enc, binary.LittleEndian, pointID)
-		binary.Write(enc, binary.LittleEndian, int32(rowIdx))
-
-		mappingCount++
-		if mappingCount%50000 == 0 {
-			progress.Update(mappingCount, len(sc.metricsStore.pointToRow))
-		}
-	}
-	sc.metricsStore.mu.RUnlock()
+	// Metadata and metrics stores removed (CH is canonical). Write zero counts
+	// so the file format remains parseable by older readers.
+	binary.Write(enc, binary.LittleEndian, uint32(0)) // numMetadataKeys
+	binary.Write(enc, binary.LittleEndian, uint32(0)) // numPointMetadata
+	binary.Write(enc, binary.LittleEndian, uint32(0)) // numMetricKeys
+	binary.Write(enc, binary.LittleEndian, uint32(0)) // numPointMetrics
 
 	// Close and flush
 	progress.SetStage("Finalizing file")
@@ -301,160 +219,91 @@ func LoadCompressedSupercluster(filename string) (*Supercluster, error) {
 		}
 	}
 
-	// Create reusable buffer for reading
+	// Metadata and metrics stores removed; skip their serialised bytes.
+	// Files written by the new SaveCompressed contain zero counts, so the
+	// loops below are no-ops. Old files with real data are drained correctly.
 	buf := make([]byte, 32*1024)
 
-	// Load metadata store
-	progress.SetStage("Loading metadata keys")
+	// Drain metadata keys
 	var numKeys uint32
 	binary.Read(dec, binary.LittleEndian, &numKeys)
-
-	// Read keys
 	for i := uint32(0); i < numKeys; i++ {
 		var keyLen uint32
 		binary.Read(dec, binary.LittleEndian, &keyLen)
-
 		if int(keyLen) > len(buf) {
 			buf = make([]byte, keyLen)
 		}
-
 		io.ReadFull(dec, buf[:keyLen])
-		key := sc.metadataStore.stringPool.Intern(string(buf[:keyLen]))
-		sc.metadataStore.keyToID[key] = MetadataKey(i)
-		sc.metadataStore.idToKey = append(sc.metadataStore.idToKey, key)
-
-		if i > 0 && i%10000 == 0 {
-			progress.Update(int(i), int(numKeys))
-		}
 	}
-	sc.metadataStore.nextKeyID = MetadataKey(numKeys)
 
-	// Read point metadata
-	progress.SetStage("Loading point metadata")
+	// Drain point metadata
 	var numPointMetadata uint32
 	binary.Read(dec, binary.LittleEndian, &numPointMetadata)
-
 	for i := uint32(0); i < numPointMetadata; i++ {
 		var pointID uint32
 		binary.Read(dec, binary.LittleEndian, &pointID)
-
 		var numEntries uint32
 		binary.Read(dec, binary.LittleEndian, &numEntries)
-
-		entries := make([]MetadataEntry, numEntries)
-
 		for j := uint32(0); j < numEntries; j++ {
-			binary.Read(dec, binary.LittleEndian, &entries[j].Key)
-			binary.Read(dec, binary.LittleEndian, &entries[j].Value.Type)
-
-			switch entries[j].Value.Type {
+			var key uint32
+			var valType byte
+			binary.Read(dec, binary.LittleEndian, &key)
+			binary.Read(dec, binary.LittleEndian, &valType)
+			switch valType {
 			case 0: // string
 				var strLen uint32
 				binary.Read(dec, binary.LittleEndian, &strLen)
-
 				if int(strLen) > len(buf) {
 					buf = make([]byte, strLen)
 				}
-
 				io.ReadFull(dec, buf[:strLen])
-				entries[j].Value.StringVal = sc.metadataStore.stringPool.Intern(string(buf[:strLen]))
-
 			case 1: // number
-				binary.Read(dec, binary.LittleEndian, &entries[j].Value.NumVal)
-
+				var v float64
+				binary.Read(dec, binary.LittleEndian, &v)
 			case 2: // bool
-				binary.Read(dec, binary.LittleEndian, &entries[j].Value.BoolVal)
+				var v bool
+				binary.Read(dec, binary.LittleEndian, &v)
 			}
-		}
-
-		sc.metadataStore.pointMeta[pointID] = entries
-
-		if i > 0 && i%10000 == 0 {
-			progress.Update(int(i), int(numPointMetadata))
 		}
 	}
 
-	// Periodic GC to keep memory usage stable
-	runtime.GC()
-
-	// Load metrics store
-	progress.SetStage("Loading metrics keys")
+	// Drain metric keys + columns
 	var numMetricKeys uint32
 	binary.Read(dec, binary.LittleEndian, &numMetricKeys)
-
-	// Read metric keys
 	for i := uint32(0); i < numMetricKeys; i++ {
 		var keyLen uint32
 		binary.Read(dec, binary.LittleEndian, &keyLen)
-
 		if int(keyLen) > len(buf) {
 			buf = make([]byte, keyLen)
 		}
-
 		io.ReadFull(dec, buf[:keyLen])
-		key := sc.metricsStore.stringPool.Intern(string(buf[:keyLen]))
-
-		sc.metricsStore.keys = append(sc.metricsStore.keys, key)
-		sc.metricsStore.keyToColumn[key] = int(i)
-
-		if i > 0 && i%1000 == 0 {
-			progress.Update(int(i), int(numMetricKeys))
-		}
 	}
-
-	// Read value columns
-	progress.SetStage("Loading metrics values")
-	sc.metricsStore.columns = make([][]float32, numMetricKeys)
 	for i := uint32(0); i < numMetricKeys; i++ {
 		var colSize uint32
 		binary.Read(dec, binary.LittleEndian, &colSize)
-
-		column := make([]float32, colSize)
-
-		// Read column in chunks to reduce memory pressure
-		chunkSize := 50000
-		for offset := uint32(0); offset < colSize; offset += uint32(chunkSize) {
-			end := offset + uint32(chunkSize)
-			if end > colSize {
-				end = colSize
-			}
-
-			for j := offset; j < end; j++ {
-				binary.Read(dec, binary.LittleEndian, &column[j])
-			}
+		var v float32
+		for j := uint32(0); j < colSize; j++ {
+			binary.Read(dec, binary.LittleEndian, &v)
 		}
-
-		sc.metricsStore.columns[i] = column
-		progress.Update(int(i+1), int(numMetricKeys))
 	}
 
-	// Read point to row mapping
-	progress.SetStage("Loading metrics mapping")
+	// Drain point-to-row mapping
 	var numPointMetrics uint32
 	binary.Read(dec, binary.LittleEndian, &numPointMetrics)
-
 	for i := uint32(0); i < numPointMetrics; i++ {
 		var pointID uint32
 		var rowIdx int32
 		binary.Read(dec, binary.LittleEndian, &pointID)
 		binary.Read(dec, binary.LittleEndian, &rowIdx)
-
-		sc.metricsStore.pointToRow[pointID] = int(rowIdx)
-
-		if i > 0 && i%50000 == 0 {
-			progress.Update(int(i), int(numPointMetrics))
-		}
 	}
 
 	progress.SetStage("Building tree")
-	// Build tree
 	sc.Tree = &KDTree{
 		Nodes:    nodes,
 		Points:   points,
 		NodeSize: options.NodeSize,
 	}
 
-	// Calculate tree bounds if needed
 	if len(points) > 0 {
 		bounds := KDBounds{
 			MinX: points[0].X,
@@ -463,32 +312,19 @@ func LoadCompressedSupercluster(filename string) (*Supercluster, error) {
 			MaxY: points[0].Y,
 		}
 
-		// Calculate bounds in batches
 		batchSize := 100000
 		for i := 0; i < len(points); i += batchSize {
 			end := i + batchSize
 			if end > len(points) {
 				end = len(points)
 			}
-
 			for j := i; j < end; j++ {
 				bounds.Extend(points[j].X, points[j].Y)
 			}
-
 			progress.Update(end, len(points))
 		}
 
 		sc.Tree.Bounds = bounds
-	}
-
-	// Create original points slice (only IDs and coordinates)
-	sc.Points = make([]Point, len(points))
-	for i, p := range points {
-		sc.Points[i] = Point{
-			ID: p.ID,
-			X:  p.X,
-			Y:  p.Y,
-		}
 	}
 
 	return sc, nil

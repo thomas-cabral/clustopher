@@ -8,384 +8,8 @@ import (
 	"runtime"
 	"runtime/debug"
 	"sort"
-
 	"sync"
 )
-
-// Global string interning pool to deduplicate strings
-var globalStringPool = &StringPool{
-	strings: make(map[string]string, 10000),
-}
-
-// StringPool provides global string interning
-type StringPool struct {
-	strings map[string]string
-	mu      sync.RWMutex
-}
-
-// Intern returns a single instance of a string to reduce memory usage
-func (p *StringPool) Intern(s string) string {
-	// First check without a write lock
-	p.mu.RLock()
-	interned, ok := p.strings[s]
-	p.mu.RUnlock()
-
-	if ok {
-		return interned
-	}
-
-	// Need to add it - acquire write lock
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Check again to handle race conditions
-	if interned, ok = p.strings[s]; ok {
-		return interned
-	}
-
-	// Store and return the string itself (which becomes the interned version)
-	p.strings[s] = s
-	return s
-}
-
-// MetadataKey represents a string value in a compact way
-type MetadataKey uint32
-
-// MetadataValue represents a value that can be one of several types
-type MetadataValue struct {
-	// Only one of these fields is used depending on the type
-	StringVal string
-	NumVal    float64
-	BoolVal   bool
-	Type      byte // 0=string, 1=number, 2=bool
-}
-
-// MetadataStore provides efficient storage of metadata
-type MetadataStore struct {
-	// Maps from key string to key ID
-	keyToID map[string]MetadataKey
-	// Maps from key ID to original string
-	idToKey []string
-	// Maps from point ID to a metadata record
-	pointMeta map[uint32][]MetadataEntry
-	// Pool for string interning
-	stringPool *StringPool
-
-	nextKeyID MetadataKey
-	mu        sync.RWMutex
-}
-
-// MetadataEntry is a compact key-value pair
-type MetadataEntry struct {
-	Key   MetadataKey
-	Value MetadataValue
-}
-
-// NewMetadataStore creates a new metadata store
-func NewMetadataStore() *MetadataStore {
-	return &MetadataStore{
-		keyToID:    make(map[string]MetadataKey),
-		idToKey:    make([]string, 0, 100),
-		pointMeta:  make(map[uint32][]MetadataEntry),
-		stringPool: globalStringPool,
-	}
-}
-
-// AddMetadata adds metadata for a point
-func (ms *MetadataStore) AddMetadata(pointID uint32, metadata map[string]interface{}) {
-	if len(metadata) == 0 {
-		return
-	}
-
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
-
-	entries := make([]MetadataEntry, 0, len(metadata))
-
-	for k, v := range metadata {
-		// Intern the key string to save memory
-		k = ms.stringPool.Intern(k)
-
-		// Get or create key ID
-		keyID, ok := ms.keyToID[k]
-		if !ok {
-			keyID = ms.nextKeyID
-			ms.nextKeyID++
-			ms.keyToID[k] = keyID
-			ms.idToKey = append(ms.idToKey, k)
-		}
-
-		// Convert and store the value based on its type
-		var metaValue MetadataValue
-
-		switch val := v.(type) {
-		case string:
-			metaValue.StringVal = ms.stringPool.Intern(val)
-			metaValue.Type = 0
-		case float64:
-			metaValue.NumVal = val
-			metaValue.Type = 1
-		case float32:
-			metaValue.NumVal = float64(val)
-			metaValue.Type = 1
-		case int:
-			metaValue.NumVal = float64(val)
-			metaValue.Type = 1
-		case int32:
-			metaValue.NumVal = float64(val)
-			metaValue.Type = 1
-		case int64:
-			metaValue.NumVal = float64(val)
-			metaValue.Type = 1
-		case bool:
-			metaValue.BoolVal = val
-			metaValue.Type = 2
-		default:
-			// Skip unsupported types
-			continue
-		}
-
-		entries = append(entries, MetadataEntry{
-			Key:   keyID,
-			Value: metaValue,
-		})
-	}
-
-	if len(entries) > 0 {
-		ms.pointMeta[pointID] = entries
-	}
-}
-
-// GetMetadata retrieves metadata for a point
-func (ms *MetadataStore) GetMetadata(pointID uint32) map[string]interface{} {
-	ms.mu.RLock()
-	entries, ok := ms.pointMeta[pointID]
-	ms.mu.RUnlock()
-
-	if !ok || len(entries) == 0 {
-		return nil
-	}
-
-	result := make(map[string]interface{}, len(entries))
-
-	for _, entry := range entries {
-		if int(entry.Key) >= len(ms.idToKey) {
-			continue
-		}
-
-		key := ms.idToKey[entry.Key]
-
-		switch entry.Value.Type {
-		case 0: // string
-			result[key] = entry.Value.StringVal
-		case 1: // number
-			result[key] = entry.Value.NumVal
-		case 2: // bool
-			result[key] = entry.Value.BoolVal
-		}
-	}
-
-	return result
-}
-
-// GetMetadataAsJSON returns metadata in JSON format
-func (ms *MetadataStore) GetMetadataAsJSON(pointID uint32) map[string]json.RawMessage {
-	meta := ms.GetMetadata(pointID)
-	if meta == nil {
-		return nil
-	}
-
-	result := make(map[string]json.RawMessage, len(meta))
-
-	for k, v := range meta {
-		if jsonBytes, err := json.Marshal(v); err == nil {
-			result[k] = jsonBytes
-		}
-	}
-
-	return result
-}
-
-// CalculateFrequencies calculates frequency distributions for cluster metadata
-func (ms *MetadataStore) CalculateFrequencies(pointIDs []uint32) map[string]json.RawMessage {
-	if len(pointIDs) == 0 {
-		return nil
-	}
-
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
-
-	// Count unique keys across all points
-	keySet := make(map[MetadataKey]bool)
-	for _, id := range pointIDs {
-		entries, ok := ms.pointMeta[id]
-		if !ok {
-			continue
-		}
-
-		for _, entry := range entries {
-			keySet[entry.Key] = true
-		}
-	}
-
-	if len(keySet) == 0 {
-		return nil
-	}
-
-	result := make(map[string]json.RawMessage, len(keySet))
-
-	// For each key, calculate value frequencies
-	for keyID := range keySet {
-		if int(keyID) >= len(ms.idToKey) {
-			continue
-		}
-
-		key := ms.idToKey[keyID]
-
-		// Count value frequencies
-		valueFreq := make(map[string]int)
-		totalPoints := 0
-
-		for _, id := range pointIDs {
-			entries, ok := ms.pointMeta[id]
-			if !ok {
-				continue
-			}
-
-			for _, entry := range entries {
-				if entry.Key != keyID {
-					continue
-				}
-
-				// Convert value to string representation
-				var valueStr string
-				switch entry.Value.Type {
-				case 0: // string
-					valueStr = entry.Value.StringVal
-				case 1: // number
-					valueStr = fmt.Sprintf("%g", entry.Value.NumVal)
-				case 2: // bool
-					valueStr = fmt.Sprintf("%t", entry.Value.BoolVal)
-				}
-
-				valueFreq[valueStr]++
-				totalPoints++
-			}
-		}
-
-		// Convert to frequency percentages
-		freqMap := make(map[string]float64, len(valueFreq))
-		for val, count := range valueFreq {
-			freqMap[val] = float64(count) / float64(totalPoints)
-		}
-
-		// Marshal to JSON
-		if jsonBytes, err := json.Marshal(freqMap); err == nil {
-			result[key] = jsonBytes
-		}
-	}
-
-	return result
-}
-
-// Memory-efficient metrics storage
-type MetricsStore struct {
-	// Maps metric key to column index
-	keyToColumn map[string]int
-	// Original metric keys
-	keys []string
-	// Each column stores values for a specific metric
-	columns [][]float32
-	// Maps point ID to row index
-	pointToRow map[uint32]int
-	stringPool *StringPool
-	mu         sync.RWMutex
-}
-
-// NewMetricsStore creates a new metrics store
-func NewMetricsStore() *MetricsStore {
-	return &MetricsStore{
-		keyToColumn: make(map[string]int),
-		keys:        make([]string, 0, 16),
-		columns:     make([][]float32, 0, 16),
-		pointToRow:  make(map[uint32]int),
-		stringPool:  globalStringPool,
-	}
-}
-
-// AddMetrics adds metrics for a point
-func (ms *MetricsStore) AddMetrics(pointID uint32, metrics map[string]float32) int {
-	if len(metrics) == 0 {
-		return -1
-	}
-
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
-
-	// Get or create row for this point
-	rowIdx, ok := ms.pointToRow[pointID]
-	if !ok {
-		rowIdx = len(ms.pointToRow)
-		ms.pointToRow[pointID] = rowIdx
-	}
-
-	// Add metrics to columns
-	for k, v := range metrics {
-		// Intern the key to save memory
-		k = ms.stringPool.Intern(k)
-
-		// Get or create column
-		colIdx, ok := ms.keyToColumn[k]
-		if !ok {
-			colIdx = len(ms.keys)
-			ms.keys = append(ms.keys, k)
-			ms.columns = append(ms.columns, make([]float32, rowIdx+1))
-			ms.keyToColumn[k] = colIdx
-		}
-
-		// Ensure column has enough rows
-		if rowIdx >= len(ms.columns[colIdx]) {
-			// Extend column with zeroes
-			newSize := rowIdx + 1
-			if newSize < len(ms.columns[colIdx])*2 {
-				newSize = len(ms.columns[colIdx]) * 2
-			}
-
-			newColumn := make([]float32, newSize)
-			copy(newColumn, ms.columns[colIdx])
-			ms.columns[colIdx] = newColumn
-		}
-
-		// Store metric value
-		ms.columns[colIdx][rowIdx] = v
-	}
-
-	return rowIdx
-}
-
-// GetMetrics retrieves metrics for a point
-func (ms *MetricsStore) GetMetrics(pointID uint32) map[string]float32 {
-	ms.mu.RLock()
-	rowIdx, ok := ms.pointToRow[pointID]
-	ms.mu.RUnlock()
-
-	if !ok {
-		return nil
-	}
-
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
-
-	result := make(map[string]float32, len(ms.keys))
-
-	for colIdx, key := range ms.keys {
-		if rowIdx < len(ms.columns[colIdx]) {
-			result[key] = ms.columns[colIdx][rowIdx]
-		}
-	}
-
-	return result
-}
 
 // Memory-optimized KDPoint structure
 type KDPoint struct {
@@ -452,14 +76,11 @@ type ClusterNode struct {
 
 // Supercluster implements the clustering algorithm
 type Supercluster struct {
-	Tree          *KDTree       // K-d tree for spatial queries
-	Skeleton      *SkeletonTree // Bounds-only leaf index (populated alongside Tree)
-	Points        []Point       // Original input points
-	Options       SuperclusterOptions
-	zoomScale     []float64      // Pre-calculated zoom scales
-	latLookup     []float32      // Pre-calculated latitude projections
-	metadataStore *MetadataStore // Efficient metadata storage
-	metricsStore  *MetricsStore  // Efficient metrics storage
+	Tree      *KDTree       // K-d tree for spatial queries
+	Skeleton  *SkeletonTree // Bounds-only leaf index (populated alongside Tree)
+	Options   SuperclusterOptions
+	zoomScale []float64 // Pre-calculated zoom scales
+	latLookup []float32 // Pre-calculated latitude projections
 
 	// CH integration (optional; if nil, Load behaves as in-mem only).
 	ch        *CHClient
@@ -564,11 +185,9 @@ func NewSupercluster(options SuperclusterOptions) *Supercluster {
 	}
 
 	sc := &Supercluster{
-		Options:       options,
-		zoomScale:     make([]float64, options.MaxZoom+1),
-		latLookup:     make([]float32, latTableSize+1),
-		metadataStore: NewMetadataStore(),
-		metricsStore:  NewMetricsStore(),
+		Options:   options,
+		zoomScale: make([]float64, options.MaxZoom+1),
+		latLookup: make([]float32, latTableSize+1),
 	}
 
 	// Pre-calculate zoom scales
@@ -606,15 +225,7 @@ func (sc *Supercluster) Load(points []Point) error {
 	// Convert points to KDPoints
 	kdPoints := make([]KDPoint, len(points))
 
-	// Process metrics and metadata
 	for i, p := range points {
-		// Add metadata to store
-		sc.metadataStore.AddMetadata(p.ID, p.Metadata)
-
-		// Add metrics to store
-		sc.metricsStore.AddMetrics(p.ID, p.Metrics)
-
-		// Create KDPoint (minimal data needed for spatial operations)
 		kdPoints[i] = KDPoint{
 			X:         p.X,
 			Y:         p.Y,
@@ -625,22 +236,16 @@ func (sc *Supercluster) Load(points []Point) error {
 
 	// Build KD-tree
 	sc.Tree = sc.buildKDTree(kdPoints)
-	sc.Points = points
 
 	return sc.buildSkeletonAndPersist(points)
 }
 
-// loadBatched processes points in batches to reduce memory usage
+// loadBatched handles large point sets (kept for the Load routing path).
 func (sc *Supercluster) loadBatched(points []Point, batchSize int) error {
-	// Determine number of batches
 	numPoints := len(points)
-	numBatches := (numPoints + batchSize - 1) / batchSize
+	fmt.Printf("Loading %d points\n", numPoints)
 
-	fmt.Printf("Processing in %d batches of size %d\n", numBatches, batchSize)
-
-	// First collect all points with minimal data to build tree
 	allKdPoints := make([]KDPoint, numPoints)
-
 	for i, p := range points {
 		allKdPoints[i] = KDPoint{
 			X:         p.X,
@@ -650,35 +255,7 @@ func (sc *Supercluster) loadBatched(points []Point, batchSize int) error {
 		}
 	}
 
-	// Build tree with all points
 	sc.Tree = sc.buildKDTree(allKdPoints)
-
-	// Now process metadata and metrics in batches
-	for i := 0; i < numPoints; i += batchSize {
-		end := i + batchSize
-		if end > numPoints {
-			end = numPoints
-		}
-
-		fmt.Printf("Processing batch %d/%d (points %d-%d)\n",
-			i/batchSize+1, numBatches, i, end-1)
-
-		// Process batch
-		for j := i; j < end; j++ {
-			p := points[j]
-			sc.metadataStore.AddMetadata(p.ID, p.Metadata)
-			sc.metricsStore.AddMetrics(p.ID, p.Metrics)
-		}
-
-		// Force GC between batches
-		if i > 0 && i%(batchSize*5) == 0 {
-			runtime.GC()
-			debug.FreeOSMemory()
-		}
-	}
-
-	sc.Points = points
-
 	return sc.buildSkeletonAndPersist(points)
 }
 
@@ -953,13 +530,6 @@ func (sc *Supercluster) CleanupCluster() {
 		sc.Tree.Points = nil
 		sc.Tree = nil
 	}
-
-	// Clear all points
-	sc.Points = nil
-
-	// Clear storage
-	sc.metadataStore = NewMetadataStore()
-	sc.metricsStore = NewMetricsStore()
 
 	// Force GC
 	runtime.GC()
@@ -1954,67 +1524,17 @@ func (sc *Supercluster) createCluster(points []KDPoint) ClusterNode {
 		Metadata: make(map[string]json.RawMessage),
 	}
 
-	// Add metrics from all points
-	if len(pointIDs) > 0 {
-		metrics := sc.aggregateMetrics(pointIDs)
-		if metrics != nil {
-			cluster.Metrics = metrics
-		}
-
-		// Calculate metadata frequencies
-		metadata := sc.metadataStore.CalculateFrequencies(pointIDs)
-		if metadata != nil {
-			cluster.Metadata = metadata
-		}
-	}
-
 	return cluster
 }
 
 // createSinglePointCluster creates a cluster for a single point
 func (sc *Supercluster) createSinglePointCluster(p KDPoint) ClusterNode {
-	cluster := ClusterNode{
+	return ClusterNode{
 		ID:    p.ID,
 		X:     p.X,
 		Y:     p.Y,
 		Count: 1,
 	}
-
-	// Get metrics for this point
-	cluster.Metrics = sc.metricsStore.GetMetrics(p.ID)
-
-	// Get metadata for this point
-	cluster.Metadata = sc.metadataStore.GetMetadataAsJSON(p.ID)
-
-	return cluster
-}
-
-// aggregateMetrics sums metrics for all points in a cluster
-func (sc *Supercluster) aggregateMetrics(pointIDs []uint32) map[string]float32 {
-	if len(pointIDs) == 0 {
-		return nil
-	}
-
-	// If just one point, return its metrics directly
-	if len(pointIDs) == 1 {
-		return sc.metricsStore.GetMetrics(pointIDs[0])
-	}
-
-	// Sum metrics across all points
-	result := make(map[string]float32)
-
-	for _, id := range pointIDs {
-		metrics := sc.metricsStore.GetMetrics(id)
-		if metrics == nil {
-			continue
-		}
-
-		for k, v := range metrics {
-			result[k] += v
-		}
-	}
-
-	return result
 }
 
 // ToGeoJSON converts clusters to GeoJSON format
