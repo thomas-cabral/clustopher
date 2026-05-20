@@ -1,5 +1,6 @@
--- TEMPLATE: rollup_z{N}. Runner expands {N} for N in 2..16.
--- Radius=40 is encoded in the MV definition; recreating MVs is required if Radius changes.
+-- TEMPLATE: rollup_z{N}. Runner expands {N} for N in 2..16 and {RADIUS} from
+-- cluster.DefaultRollupRadius. Recreate all MVs if DefaultRollupRadius changes
+-- — the value is baked into stored tile coords.
 
 CREATE TABLE IF NOT EXISTS clustopher.rollup_z{N} (
     cluster_id  String,
@@ -18,8 +19,8 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS clustopher.mv_rollup_z{N}
 TO clustopher.rollup_z{N} AS
 SELECT
     cluster_id,
-    toUInt32(((x + 180) / 360) * pow(2, {N}) * 512 / 40) AS tile_x,
-    toUInt32(((1 - log(tan(y * pi()/180) + 1/cos(y * pi()/180)) / pi()) / 2) * pow(2, {N}) * 512 / 40) AS tile_y,
+    toUInt32(((x + 180) / 360) * pow(2, {N}) * 512 / {RADIUS}) AS tile_x,
+    toUInt32(((1 - log(tan(y * pi()/180) + 1/cos(y * pi()/180)) / pi()) / 2) * pow(2, {N}) * 512 / {RADIUS}) AS tile_y,
     1                                                     AS cnt,
     x                                                     AS sum_x,
     y                                                     AS sum_y,
