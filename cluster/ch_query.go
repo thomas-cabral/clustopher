@@ -91,3 +91,165 @@ func (sc *Supercluster) queryRollup(ctx context.Context, viewport KDBounds, zoom
 func synthClusterID(zoom int, tileX, tileY uint32) uint32 {
 	return (tileX << 16) ^ (tileY << 5) ^ uint32(zoom)
 }
+
+// queryTree handles zoom >= ZSplit. Walks the skeleton, classifies leaves,
+// fetches their contents from CH, and emits clusters.
+func (sc *Supercluster) queryTree(ctx context.Context, viewport KDBounds, zoom int) ([]ClusterNode, error) {
+	if sc.Skeleton == nil {
+		return nil, fmt.Errorf("queryTree requires Skeleton (call Open or Load first)")
+	}
+
+	// Convert viewport (lng/lat) to MaxZoom pixel space; skeleton bounds are there.
+	topLeft := sc.projectFast(viewport.MinX, viewport.MaxY, sc.Options.MaxZoom)
+	botRight := sc.projectFast(viewport.MaxX, viewport.MinY, sc.Options.MaxZoom)
+	vp := KDBounds{
+		MinX: topLeft[0],
+		MinY: topLeft[1],
+		MaxX: botRight[0],
+		MaxY: botRight[1],
+	}
+
+	leafIdxs := sc.Skeleton.RangeLeaves(vp)
+	inside := make([]int32, 0, len(leafIdxs))
+	partial := make([]int32, 0, len(leafIdxs))
+	for _, i := range leafIdxs {
+		b := sc.Skeleton.Leaves[i].Bounds
+		if b.MinX >= vp.MinX && b.MaxX <= vp.MaxX && b.MinY >= vp.MinY && b.MaxY <= vp.MaxY {
+			inside = append(inside, i)
+		} else {
+			partial = append(partial, i)
+		}
+	}
+
+	out := make([]ClusterNode, 0, len(leafIdxs))
+
+	if len(inside) > 0 {
+		agg, err := sc.aggregateLeaves(ctx, inside)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, agg...)
+	}
+
+	if len(partial) > 0 {
+		pts, err := sc.fetchLeafPoints(ctx, partial, zoom)
+		if err != nil {
+			return nil, err
+		}
+		if len(pts) > 0 {
+			clusters := sc.clusterPoints(pts, float32(sc.Options.Radius))
+			sc.unprojectClusters(clusters, zoom)
+			out = append(out, clusters...)
+		}
+	}
+
+	return out, nil
+}
+
+// aggregateLeaves emits one ClusterNode per inside leaf by aggregating across
+// each leaf's id range in CH. One round-trip via UNION ALL of per-leaf SELECTs.
+func (sc *Supercluster) aggregateLeaves(ctx context.Context, leaves []int32) ([]ClusterNode, error) {
+	if len(leaves) == 0 {
+		return nil, nil
+	}
+	parts := make([]string, 0, len(leaves))
+	args := []interface{}{}
+	for _, li := range leaves {
+		leaf := sc.Skeleton.Leaves[li]
+		parts = append(parts, `
+            SELECT toInt32(?) AS leaf_idx, count() AS cnt, avg(x) AS cx, avg(y) AS cy,
+                   sumMap(metrics) AS msum,
+                   sumMap(mapFromArrays(mapKeys(metrics), arrayMap(v -> toUInt64(1), mapValues(metrics)))) AS mcnt
+            FROM clustopher.points
+            WHERE cluster_id = ? AND id BETWEEN ? AND ?
+        `)
+		args = append(args, li, sc.clusterID, leaf.IDMin, leaf.IDMax)
+	}
+	q := joinUnion(parts)
+	rows, err := sc.ch.Conn().Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate leaves: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]ClusterNode, 0, len(leaves))
+	var (
+		leafIdx int32
+		cnt     uint64
+		cx, cy  float64
+		msum    map[string]float64
+		mcnt    map[string]uint64
+	)
+	for rows.Next() {
+		if err := rows.Scan(&leafIdx, &cnt, &cx, &cy, &msum, &mcnt); err != nil {
+			return nil, fmt.Errorf("scan agg row: %w", err)
+		}
+		if cnt < uint64(sc.Options.MinPoints) {
+			continue
+		}
+		metrics := make(map[string]float32, len(msum))
+		for k, s := range msum {
+			if n := mcnt[k]; n > 0 {
+				metrics[k] = float32(s / float64(n))
+			}
+		}
+		out = append(out, ClusterNode{
+			ID:      uint32(leafIdx),
+			X:       float32(cx),
+			Y:       float32(cy),
+			Count:   uint32(cnt),
+			Metrics: metrics,
+		})
+	}
+	return out, rows.Err()
+}
+
+func joinUnion(parts []string) string {
+	s := parts[0]
+	for _, p := range parts[1:] {
+		s += "\nUNION ALL\n" + p
+	}
+	return s
+}
+
+// fetchLeafPoints fetches all points belonging to the given leaves and returns
+// them projected to the target zoom (so existing clusterPoints can run).
+func (sc *Supercluster) fetchLeafPoints(ctx context.Context, leaves []int32, zoom int) ([]KDPoint, error) {
+	if len(leaves) == 0 {
+		return nil, nil
+	}
+	parts := make([]string, 0, len(leaves))
+	args := []interface{}{}
+	for _, li := range leaves {
+		leaf := sc.Skeleton.Leaves[li]
+		parts = append(parts, `(cluster_id = ? AND id BETWEEN ? AND ?)`)
+		args = append(args, sc.clusterID, leaf.IDMin, leaf.IDMax)
+	}
+	q := `SELECT id, x, y FROM clustopher.points WHERE ` + joinOr(parts)
+
+	rows, err := sc.ch.Conn().Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("fetch leaf points: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]KDPoint, 0, len(leaves)*sc.Options.NodeSize)
+	var id uint32
+	var x, y float32
+	for rows.Next() {
+		if err := rows.Scan(&id, &x, &y); err != nil {
+			return nil, err
+		}
+		proj := sc.projectFast(x, y, zoom)
+		out = append(out, KDPoint{ID: id, X: proj[0], Y: proj[1], NumPoints: 1})
+	}
+	return out, rows.Err()
+}
+
+func joinOr(parts []string) string {
+	s := parts[0]
+	for _, p := range parts[1:] {
+		s += " OR " + p
+	}
+	return s
+}

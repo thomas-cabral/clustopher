@@ -47,6 +47,28 @@ func setupQueryFixture(t *testing.T, clusterID string, n int) *Supercluster {
 var _ = json.Unmarshal
 var _ = filepath.Join
 
+func TestQueryTree_HighZoomTotalsMatch(t *testing.T) {
+	sc := setupQueryFixture(t, "TEST_TR", 10000)
+	defer sc.ch.Close()
+
+	bounds := KDBounds{MinX: -100, MinY: 35, MaxX: -95, MaxY: 40}
+	clusters, err := sc.queryTree(context.Background(), bounds, 14)
+	if err != nil {
+		t.Fatalf("queryTree: %v", err)
+	}
+
+	var total uint32
+	for _, c := range clusters {
+		total += c.Count
+	}
+	if total == 0 {
+		t.Fatal("no points returned")
+	}
+	if total > 10000 {
+		t.Fatalf("total %d > 10000", total)
+	}
+}
+
 func TestQueryRollup_TotalsMatchInput(t *testing.T) {
 	sc := setupQueryFixture(t, "TEST_RU", 10000)
 	defer sc.ch.Close()
