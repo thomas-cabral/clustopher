@@ -137,6 +137,76 @@ func BenchmarkClusteringLarge_HighZoom(b *testing.B) {
 	benchmarkClustering(b, 100000, 14)
 }
 
+// generateKDPointsDirect builds KDPoints without allocating Point metadata.
+// Use for huge datasets where per-point maps would dominate memory.
+func generateKDPointsDirect(sc *Supercluster, n int, zoom int, minLng, maxLng, minLat, maxLat float32) []KDPoint {
+	kdPoints := make([]KDPoint, n)
+	source := rand.NewSource(42)
+	r := rand.New(source)
+	for i := 0; i < n; i++ {
+		x := minLng + r.Float32()*(maxLng-minLng)
+		y := minLat + r.Float32()*(maxLat-minLat)
+		projected := sc.projectFast(x, y, zoom)
+		kdPoints[i] = KDPoint{
+			ID:        uint32(i + 1),
+			X:         projected[0],
+			Y:         projected[1],
+			NumPoints: 1,
+		}
+	}
+	return kdPoints
+}
+
+// benchmarkClusteringHuge runs clustering on very large datasets without
+// allocating per-point metadata. Use with -benchtime=1x.
+func benchmarkClusteringHuge(b *testing.B, numPoints int, zoom int) {
+	sc := NewSupercluster(SuperclusterOptions{
+		MinZoom:   0,
+		MaxZoom:   16,
+		MinPoints: 3,
+		Radius:    40,
+		Extent:    512,
+		NodeSize:  64,
+		Log:       false,
+	})
+
+	kdPoints := generateKDPointsDirect(sc, numPoints, zoom, -125.0, -65.0, 25.0, 49.0)
+
+	var memStatsBefore, memStatsAfter runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&memStatsBefore)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if numPoints > 50000 ||
+			(numPoints > 10000 && zoom < sc.Options.MaxZoom/2) ||
+			zoom < sc.Options.MaxZoom/4 {
+			sc.clusterPointsWithGrid(kdPoints, float32(sc.Options.Radius), zoom)
+		} else if numPoints > 5000 && zoom > sc.Options.MaxZoom/2 {
+			sc.clusterPointsWithKDTree(kdPoints, float32(sc.Options.Radius), zoom)
+		} else {
+			sc.clusterPoints(kdPoints, float32(sc.Options.Radius))
+		}
+	}
+	b.StopTimer()
+
+	runtime.ReadMemStats(&memStatsAfter)
+	allocMB := float64(memStatsAfter.TotalAlloc-memStatsBefore.TotalAlloc) / 1024 / 1024
+	b.ReportMetric(allocMB, "MB/op")
+}
+
+func BenchmarkClusteringHuge_LowZoom(b *testing.B) {
+	benchmarkClusteringHuge(b, 15_000_000, 2)
+}
+
+func BenchmarkClusteringHuge_MidZoom(b *testing.B) {
+	benchmarkClusteringHuge(b, 15_000_000, 8)
+}
+
+func BenchmarkClusteringHuge_HighZoom(b *testing.B) {
+	benchmarkClusteringHuge(b, 15_000_000, 14)
+}
+
 // TestProfileClustering profiles clustering by comparing methods
 func TestProfileClustering(t *testing.T) {
 	// Skip during normal testing unless explicitly enabled
