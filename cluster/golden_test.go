@@ -42,7 +42,9 @@ func TestGoldenSnapshots(t *testing.T) {
 			Extent: 512, NodeSize: 64, Log: false,
 		})
 		points := generateRandomPoints(c.n, -125.0, -65.0, 25.0, 49.0)
-		sc.Load(points)
+		if err := sc.Load(points); err != nil {
+			t.Fatalf("Load: %v", err)
+		}
 		clusters := sc.GetClusters(goldenBounds, c.zoom)
 
 		path := filepath.Join("testdata/golden", fmt.Sprintf("n%d_z%d.json", c.n, c.zoom))

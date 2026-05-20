@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -452,15 +453,26 @@ type ClusterNode struct {
 
 // Supercluster implements the clustering algorithm
 type Supercluster struct {
-	Tree          *KDTree      // K-d tree for spatial queries
+	Tree          *KDTree       // K-d tree for spatial queries
 	Skeleton      *SkeletonTree // Bounds-only leaf index (populated alongside Tree)
-	Points        []Point      // Original input points
+	Points        []Point       // Original input points
 	Options       SuperclusterOptions
 	zoomScale     []float64      // Pre-calculated zoom scales
 	latLookup     []float32      // Pre-calculated latitude projections
 	metadataStore *MetadataStore // Efficient metadata storage
 	metricsStore  *MetricsStore  // Efficient metrics storage
+
+	// CH integration (optional; if nil, Load behaves as in-mem only).
+	ch        *CHClient
+	clusterID string
 }
+
+// SetCHClient injects a CH client. If nil, Load behaves like Phase 1 (in-mem only).
+func (sc *Supercluster) SetCHClient(c *CHClient) { sc.ch = c }
+
+// SetClusterID sets the cluster_id used in CH partition values. Required when
+// SetCHClient is non-nil.
+func (sc *Supercluster) SetClusterID(id string) { sc.clusterID = id }
 
 type SuperclusterOptions struct {
 	MinZoom   int
@@ -576,13 +588,12 @@ func NewSupercluster(options SuperclusterOptions) *Supercluster {
 }
 
 // Load initializes the cluster index with points
-func (sc *Supercluster) Load(points []Point) {
+func (sc *Supercluster) Load(points []Point) error {
 	fmt.Printf("Loading %d points\n", len(points))
 
 	// For large datasets, process in batches
 	if len(points) > 1000000 {
-		sc.loadBatched(points, 1000000)
-		return
+		return sc.loadBatched(points, 1000000)
 	}
 
 	// Convert points to KDPoints
@@ -609,19 +620,30 @@ func (sc *Supercluster) Load(points []Point) {
 	sc.Tree = sc.buildKDTree(kdPoints)
 	sc.Points = points
 
-	// Build SkeletonTree (bounds-only leaves). Phase 1: ids in leaf bounds
-	// are still external Point.IDs; Phase 2 will remap to internal leaf-order ids.
+	// Build skeleton with id remap (internal leaf-order ids 1..N).
 	projected := make([]KDPoint, len(points))
 	for i, p := range points {
 		proj := sc.projectFast(p.X, p.Y, sc.Options.MaxZoom)
 		projected[i] = KDPoint{ID: p.ID, X: proj[0], Y: proj[1], NumPoints: 1}
 	}
 	sorted := SortPointsIntoLeafOrder(projected, sc.Options.NodeSize)
-	sc.Skeleton = BuildSkeleton(sorted, sc.Options.NodeSize)
+	tree, remap := BuildSkeletonWithRemap(sorted, sc.Options.NodeSize)
+	sc.Skeleton = tree
+
+	// If CH client is configured, insert rows in internal-id order.
+	if sc.ch != nil {
+		if sc.clusterID == "" {
+			return fmt.Errorf("CH client set but clusterID empty; call SetClusterID first")
+		}
+		if err := sc.insertToCH(context.Background(), sorted, remap, points); err != nil {
+			return fmt.Errorf("insert to CH: %w", err)
+		}
+	}
+	return nil
 }
 
 // loadBatched processes points in batches to reduce memory usage
-func (sc *Supercluster) loadBatched(points []Point, batchSize int) {
+func (sc *Supercluster) loadBatched(points []Point, batchSize int) error {
 	// Determine number of batches
 	numPoints := len(points)
 	numBatches := (numPoints + batchSize - 1) / batchSize
@@ -669,15 +691,82 @@ func (sc *Supercluster) loadBatched(points []Point, batchSize int) {
 
 	sc.Points = points
 
-	// Build SkeletonTree (bounds-only leaves). Phase 1: ids in leaf bounds
-	// are still external Point.IDs; Phase 2 will remap to internal leaf-order ids.
+	// Build skeleton with id remap (internal leaf-order ids 1..N).
 	projected := make([]KDPoint, numPoints)
 	for i, p := range points {
 		proj := sc.projectFast(p.X, p.Y, sc.Options.MaxZoom)
 		projected[i] = KDPoint{ID: p.ID, X: proj[0], Y: proj[1], NumPoints: 1}
 	}
-	skSorted := SortPointsIntoLeafOrder(projected, sc.Options.NodeSize)
-	sc.Skeleton = BuildSkeleton(skSorted, sc.Options.NodeSize)
+	sorted := SortPointsIntoLeafOrder(projected, sc.Options.NodeSize)
+	tree, remap := BuildSkeletonWithRemap(sorted, sc.Options.NodeSize)
+	sc.Skeleton = tree
+
+	// If CH client is configured, insert rows in internal-id order.
+	if sc.ch != nil {
+		if sc.clusterID == "" {
+			return fmt.Errorf("CH client set but clusterID empty; call SetClusterID first")
+		}
+		if err := sc.insertToCH(context.Background(), sorted, remap, points); err != nil {
+			return fmt.Errorf("insert to CH: %w", err)
+		}
+	}
+	return nil
+}
+
+// insertToCH inserts sorted points (with internal ids already assigned) into
+// ClickHouse. remap[i] is the external id for sorted[i]. original is used to
+// look up metrics/metadata by external id.
+func (sc *Supercluster) insertToCH(ctx context.Context, sorted []KDPoint, remap []uint32, original []Point) error {
+	// Build a lookup from external_id -> original Point (for metrics/metadata).
+	byExt := make(map[uint32]*Point, len(original))
+	for i := range original {
+		byExt[original[i].ID] = &original[i]
+	}
+
+	const batchSize = 100_000
+	rows := make([]CHPointRow, 0, batchSize)
+	flush := func() error {
+		if len(rows) == 0 {
+			return nil
+		}
+		if err := sc.ch.InsertPoints(ctx, rows); err != nil {
+			return err
+		}
+		rows = rows[:0]
+		return nil
+	}
+
+	for i, p := range sorted {
+		ext := remap[i]
+		orig := byExt[ext]
+		metaStr := map[string]string{}
+		if orig != nil {
+			for k, v := range orig.Metadata {
+				metaStr[k] = fmt.Sprintf("%v", v)
+			}
+		}
+		// unproject from MaxZoom pixel space back to lng/lat for storage.
+		ll := sc.unprojectFast(p.X, p.Y, sc.Options.MaxZoom)
+		var metrics map[string]float32
+		if orig != nil {
+			metrics = orig.Metrics
+		}
+		rows = append(rows, CHPointRow{
+			ClusterID:  sc.clusterID,
+			ID:         p.ID, // internal id (already remapped)
+			ExternalID: ext,
+			X:          ll[0],
+			Y:          ll[1],
+			Metrics:    metrics,
+			Metadata:   metaStr,
+		})
+		if len(rows) >= batchSize {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+	}
+	return flush()
 }
 
 // buildKDTree constructs a KD-tree from points

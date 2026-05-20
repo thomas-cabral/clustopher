@@ -50,7 +50,9 @@ func (r *ClusterRunner) CreateCluster(ctx context.Context, req *pb.CreateCluster
 	}
 
 	supercluster := cluster.NewSupercluster(options)
-	supercluster.Load(points)
+	if err := supercluster.Load(points); err != nil {
+		return nil, fmt.Errorf("failed to load points: %v", err)
+	}
 
 	// Generate filename with timestamp and UUID
 	savePath := generateClusterFilename(int(req.NumPoints))

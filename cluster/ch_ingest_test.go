@@ -45,6 +45,44 @@ func TestInsertPoints_WritesAllRows(t *testing.T) {
 	_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.points DROP PARTITION 'TEST_INSERT'")
 }
 
+func TestSuperclusterLoad_WritesToCH(t *testing.T) {
+	dsn := os.Getenv("CLICKHOUSE_DSN")
+	if dsn == "" {
+		t.Skip("CLICKHOUSE_DSN not set")
+	}
+	ctx := context.Background()
+	c, err := NewCHClient(ctx, CHConfig{DSN: dsn})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	defer c.Close()
+	if err := RunMigrations(ctx, c.Conn(), "migrations"); err != nil {
+		t.Fatalf("migrations: %v", err)
+	}
+	_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.points DROP PARTITION 'TEST_LOAD'")
+
+	sc := NewSupercluster(SuperclusterOptions{
+		MinZoom: 0, MaxZoom: 16, MinPoints: 3, Radius: 40,
+		Extent: 512, NodeSize: 64,
+	})
+	sc.SetCHClient(c)
+	sc.SetClusterID("TEST_LOAD")
+	pts := generateRandomPoints(2000, -125, -65, 25, 49)
+	if err := sc.Load(pts); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	var n uint64
+	if err := c.Conn().QueryRow(ctx,
+		"SELECT count() FROM clustopher.points WHERE cluster_id='TEST_LOAD'").Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 2000 {
+		t.Fatalf("count = %d, want 2000", n)
+	}
+	_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.points DROP PARTITION 'TEST_LOAD'")
+}
+
 func TestInsertPoints_TriggersRollupMVs(t *testing.T) {
 	dsn := os.Getenv("CLICKHOUSE_DSN")
 	if dsn == "" {

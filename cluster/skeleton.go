@@ -216,6 +216,20 @@ func quickselectY(pts []KDPoint, lo, hi, k int) {
 	}
 }
 
+// BuildSkeletonWithRemap is like BuildSkeleton but additionally reassigns
+// point ids to sequential leaf-order ids (1..N) and returns a remap slice
+// where remap[i] is the original (external) id of the i-th internal point.
+//
+// The input slice is mutated: ID fields are overwritten with internal ids.
+func BuildSkeletonWithRemap(points []KDPoint, nodeSize int) (*SkeletonTree, []uint32) {
+	remap := make([]uint32, len(points))
+	for i := range points {
+		remap[i] = points[i].ID
+		points[i].ID = uint32(i + 1) // 1-indexed
+	}
+	return BuildSkeleton(points, nodeSize), remap
+}
+
 // RangeLeaves returns leaf indexes whose bounds intersect the given viewport.
 // Walks the tree depth-first from the root (last node, since BuildSkeleton
 // emits the root last).

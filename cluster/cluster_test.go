@@ -492,7 +492,9 @@ func TestGetClusters(t *testing.T) {
 	}
 
 	// Load points
-	sc.Load(testPoints)
+	if err := sc.Load(testPoints); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 
 	// Test getting clusters at different zoom levels
 	bounds := KDBounds{
@@ -540,7 +542,9 @@ func TestLoad(t *testing.T) {
 	})
 
 	// Test loading empty points
-	sc.Load([]Point{})
+	if err := sc.Load([]Point{}); err != nil {
+		t.Fatalf("Load empty: %v", err)
+	}
 	if sc.Tree == nil {
 		t.Error("Expected non-nil tree even with empty points")
 	}
@@ -563,7 +567,9 @@ func TestLoad(t *testing.T) {
 		},
 	}
 
-	sc.Load(points)
+	if err := sc.Load(points); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 
 	if len(sc.Tree.Points) != len(points) {
 		t.Errorf("Expected %d points in tree, got %d", len(points), len(sc.Tree.Points))

@@ -101,7 +101,9 @@ func TestLoad_PopulatesSkeleton(t *testing.T) {
 		Extent: 512, NodeSize: 64,
 	})
 	pts := generateRandomPoints(5000, -125, -65, 25, 49)
-	sc.Load(pts)
+	if err := sc.Load(pts); err != nil {
+		t.Fatal(err)
+	}
 
 	if sc.Skeleton == nil {
 		t.Fatal("Skeleton not populated")
@@ -115,5 +117,24 @@ func TestLoad_PopulatesSkeleton(t *testing.T) {
 	}
 	if total != 5000 {
 		t.Fatalf("skeleton point count = %d, want 5000", total)
+	}
+}
+
+func TestBuildSkeletonWithRemap_AssignsSequentialIDs(t *testing.T) {
+	pts := []KDPoint{
+		{ID: 100, X: 0, Y: 0}, {ID: 200, X: 1, Y: 1},
+		{ID: 300, X: 100, Y: 100}, {ID: 400, X: 101, Y: 101},
+	}
+	sorted := SortPointsIntoLeafOrder(pts, 2)
+	tree, remap := BuildSkeletonWithRemap(sorted, 2)
+
+	if len(remap) != 4 {
+		t.Fatalf("remap len = %d", len(remap))
+	}
+	if tree.Leaves[0].IDMin != 1 || tree.Leaves[0].IDMax != 2 {
+		t.Fatalf("leaf0 ids = %d..%d", tree.Leaves[0].IDMin, tree.Leaves[0].IDMax)
+	}
+	if tree.Leaves[1].IDMin != 3 || tree.Leaves[1].IDMax != 4 {
+		t.Fatalf("leaf1 ids = %d..%d", tree.Leaves[1].IDMin, tree.Leaves[1].IDMax)
 	}
 }
