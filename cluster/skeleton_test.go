@@ -94,3 +94,26 @@ func TestRangeLeaves_ReturnsIntersectingOnly(t *testing.T) {
 		t.Fatalf("got %d leaves, want 2", len(all))
 	}
 }
+
+func TestLoad_PopulatesSkeleton(t *testing.T) {
+	sc := NewSupercluster(SuperclusterOptions{
+		MinZoom: 0, MaxZoom: 16, MinPoints: 3, Radius: 40,
+		Extent: 512, NodeSize: 64,
+	})
+	pts := generateRandomPoints(5000, -125, -65, 25, 49)
+	sc.Load(pts)
+
+	if sc.Skeleton == nil {
+		t.Fatal("Skeleton not populated")
+	}
+	if len(sc.Skeleton.Leaves) == 0 {
+		t.Fatal("Skeleton has no leaves")
+	}
+	var total uint32
+	for _, l := range sc.Skeleton.Leaves {
+		total += l.Count
+	}
+	if total != 5000 {
+		t.Fatalf("skeleton point count = %d, want 5000", total)
+	}
+}

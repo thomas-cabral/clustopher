@@ -452,8 +452,9 @@ type ClusterNode struct {
 
 // Supercluster implements the clustering algorithm
 type Supercluster struct {
-	Tree          *KDTree // K-d tree for spatial queries
-	Points        []Point // Original input points
+	Tree          *KDTree      // K-d tree for spatial queries
+	Skeleton      *SkeletonTree // Bounds-only leaf index (populated alongside Tree)
+	Points        []Point      // Original input points
 	Options       SuperclusterOptions
 	zoomScale     []float64      // Pre-calculated zoom scales
 	latLookup     []float32      // Pre-calculated latitude projections
@@ -607,6 +608,16 @@ func (sc *Supercluster) Load(points []Point) {
 	// Build KD-tree
 	sc.Tree = sc.buildKDTree(kdPoints)
 	sc.Points = points
+
+	// Build SkeletonTree (bounds-only leaves). Phase 1: ids in leaf bounds
+	// are still external Point.IDs; Phase 2 will remap to internal leaf-order ids.
+	projected := make([]KDPoint, len(points))
+	for i, p := range points {
+		proj := sc.projectFast(p.X, p.Y, sc.Options.MaxZoom)
+		projected[i] = KDPoint{ID: p.ID, X: proj[0], Y: proj[1], NumPoints: 1}
+	}
+	sorted := SortPointsIntoLeafOrder(projected, sc.Options.NodeSize)
+	sc.Skeleton = BuildSkeleton(sorted, sc.Options.NodeSize)
 }
 
 // loadBatched processes points in batches to reduce memory usage
@@ -657,6 +668,16 @@ func (sc *Supercluster) loadBatched(points []Point, batchSize int) {
 	}
 
 	sc.Points = points
+
+	// Build SkeletonTree (bounds-only leaves). Phase 1: ids in leaf bounds
+	// are still external Point.IDs; Phase 2 will remap to internal leaf-order ids.
+	projected := make([]KDPoint, numPoints)
+	for i, p := range points {
+		proj := sc.projectFast(p.X, p.Y, sc.Options.MaxZoom)
+		projected[i] = KDPoint{ID: p.ID, X: proj[0], Y: proj[1], NumPoints: 1}
+	}
+	skSorted := SortPointsIntoLeafOrder(projected, sc.Options.NodeSize)
+	sc.Skeleton = BuildSkeleton(skSorted, sc.Options.NodeSize)
 }
 
 // buildKDTree constructs a KD-tree from points
