@@ -169,7 +169,8 @@ func (sc *Supercluster) queryTree(ctx context.Context, viewport KDBounds, zoom i
 }
 
 // aggregateLeaves emits one ClusterNode per inside leaf by aggregating across
-// each leaf's id range in CH. One round-trip via UNION ALL of per-leaf SELECTs.
+// each leaf's id range in CH. Uses intDiv(id-1, NodeSize) to map each point to
+// its leaf index — query string stays fixed-size regardless of leaf count.
 // Leaves whose point count falls below MinPoints are returned in skipped so the
 // caller can route them through the partial-leaf path (fetchLeafPoints +
 // clusterPoints) to avoid silently dropping their points.
@@ -177,21 +178,30 @@ func (sc *Supercluster) aggregateLeaves(ctx context.Context, leaves []int32) (cl
 	if len(leaves) == 0 {
 		return nil, nil, nil
 	}
-	parts := make([]string, 0, len(leaves))
-	args := []interface{}{}
-	for _, li := range leaves {
-		leaf := sc.Skeleton.Leaves[li]
-		parts = append(parts, `
-            SELECT toInt32(?) AS leaf_idx, count() AS cnt, avg(x) AS cx, avg(y) AS cy,
-                   sumMap(metrics) AS msum,
-                   sumMap(mapFromArrays(mapKeys(metrics), arrayMap(v -> toUInt64(1), mapValues(metrics)))) AS mcnt
-            FROM clustopher.points
-            WHERE cluster_id = ? AND id BETWEEN ? AND ?
-        `)
-		args = append(args, li, sc.clusterID, leaf.IDMin, leaf.IDMax)
+
+	// Build an Array(UInt64) of the leaf indexes we care about.
+	// intDiv(id - 1, NodeSize) maps each point's id to its leaf index.
+	leafIdxArr := make([]uint64, len(leaves))
+	for i, li := range leaves {
+		leafIdxArr[i] = uint64(li)
 	}
-	q := joinUnion(parts)
-	rows, err := sc.ch.Conn().Query(ctx, q, args...)
+	nodeSize := uint64(sc.Options.NodeSize)
+
+	q := fmt.Sprintf(`
+        SELECT
+            toInt32(intDiv(id - 1, %d)) AS leaf_idx,
+            count() AS cnt,
+            avg(x) AS cx,
+            avg(y) AS cy,
+            sumMap(metrics) AS msum,
+            sumMap(mapFromArrays(mapKeys(metrics), arrayMap(v -> toUInt64(1), mapValues(metrics)))) AS mcnt
+        FROM clustopher.points
+        WHERE cluster_id = ?
+          AND has(?, intDiv(id - 1, %d))
+        GROUP BY leaf_idx
+    `, nodeSize, nodeSize)
+
+	rows, err := sc.ch.Conn().Query(ctx, q, sc.clusterID, leafIdxArr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("aggregate leaves: %w", err)
 	}
@@ -231,30 +241,30 @@ func (sc *Supercluster) aggregateLeaves(ctx context.Context, leaves []int32) (cl
 	return out, skip, rows.Err()
 }
 
-func joinUnion(parts []string) string {
-	s := parts[0]
-	for _, p := range parts[1:] {
-		s += "\nUNION ALL\n" + p
-	}
-	return s
-}
-
 // fetchLeafPoints fetches all points belonging to the given leaves and returns
 // them projected to the target zoom (so existing clusterPoints can run).
+// Uses intDiv(id-1, NodeSize) + has() to keep the query string fixed-size
+// regardless of leaf count, avoiding CH max_query_size limits.
 func (sc *Supercluster) fetchLeafPoints(ctx context.Context, leaves []int32, zoom int) ([]KDPoint, error) {
 	if len(leaves) == 0 {
 		return nil, nil
 	}
-	parts := make([]string, 0, len(leaves))
-	args := []interface{}{}
-	for _, li := range leaves {
-		leaf := sc.Skeleton.Leaves[li]
-		parts = append(parts, `(cluster_id = ? AND id BETWEEN ? AND ?)`)
-		args = append(args, sc.clusterID, leaf.IDMin, leaf.IDMax)
-	}
-	q := `SELECT id, x, y FROM clustopher.points WHERE ` + joinOr(parts)
 
-	rows, err := sc.ch.Conn().Query(ctx, q, args...)
+	// Build an Array(UInt64) of the leaf indexes we care about.
+	// intDiv(id - 1, NodeSize) maps each point's id to its leaf index.
+	leafIdxArr := make([]uint64, len(leaves))
+	for i, li := range leaves {
+		leafIdxArr[i] = uint64(li)
+	}
+	nodeSize := uint64(sc.Options.NodeSize)
+
+	q := fmt.Sprintf(`
+        SELECT id, x, y FROM clustopher.points
+        WHERE cluster_id = ?
+          AND has(?, intDiv(id - 1, %d))
+    `, nodeSize)
+
+	rows, err := sc.ch.Conn().Query(ctx, q, sc.clusterID, leafIdxArr)
 	if err != nil {
 		return nil, fmt.Errorf("fetch leaf points: %w", err)
 	}
@@ -271,14 +281,6 @@ func (sc *Supercluster) fetchLeafPoints(ctx context.Context, leaves []int32, zoo
 		out = append(out, KDPoint{ID: id, X: proj[0], Y: proj[1], NumPoints: 1})
 	}
 	return out, rows.Err()
-}
-
-func joinOr(parts []string) string {
-	s := parts[0]
-	for _, p := range parts[1:] {
-		s += " OR " + p
-	}
-	return s
 }
 
 // GetClustersCH is the CH-backed equivalent of GetClusters. Routes by zoom:
