@@ -253,3 +253,12 @@ func joinOr(parts []string) string {
 	}
 	return s
 }
+
+// GetClustersCH is the CH-backed equivalent of GetClusters. Routes by zoom:
+// zoom < ZSplit → queryRollup; zoom >= ZSplit → queryTree.
+func (sc *Supercluster) GetClustersCH(ctx context.Context, bounds KDBounds, zoom int) ([]ClusterNode, error) {
+	if zoom < sc.Options.ZSplit {
+		return sc.queryRollup(ctx, bounds, zoom)
+	}
+	return sc.queryTree(ctx, bounds, zoom)
+}
