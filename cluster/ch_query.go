@@ -112,13 +112,31 @@ func (sc *Supercluster) queryTree(ctx context.Context, viewport KDBounds, zoom i
 	leafIdxs := sc.Skeleton.RangeLeaves(vp)
 	inside := make([]int32, 0, len(leafIdxs))
 	partial := make([]int32, 0, len(leafIdxs))
+
+	// A leaf can be safely aggregated as a single cluster only when its
+	// physical extent at the QUERY zoom is no larger than the cluster radius.
+	// Otherwise its constituent points would cluster radius-grained under the
+	// legacy clusterPoints behavior. Leaf bounds live in MaxZoom pixel space;
+	// scale them to query zoom and compare diagonal to radius.
+	radius := float32(sc.Options.Radius)
+	zoomScale := float32(math.Pow(2, float64(zoom-sc.Options.MaxZoom))) // <= 1 when zoom <= MaxZoom
 	for _, i := range leafIdxs {
-		b := sc.Skeleton.Leaves[i].Bounds
-		if b.MinX >= vp.MinX && b.MaxX <= vp.MaxX && b.MinY >= vp.MinY && b.MaxY <= vp.MaxY {
-			inside = append(inside, i)
-		} else {
+		leaf := sc.Skeleton.Leaves[i]
+		b := leaf.Bounds
+		fullyInside := b.MinX >= vp.MinX && b.MaxX <= vp.MaxX && b.MinY >= vp.MinY && b.MaxY <= vp.MaxY
+		if !fullyInside {
 			partial = append(partial, i)
+			continue
 		}
+		dx := (b.MaxX - b.MinX) * zoomScale
+		dy := (b.MaxY - b.MinY) * zoomScale
+		// Use squared diagonal vs squared (2*radius) to compare without sqrt.
+		// 2*radius is the maximum allowable diameter for a single cluster.
+		if dx*dx+dy*dy > (2*radius)*(2*radius) {
+			partial = append(partial, i)
+			continue
+		}
+		inside = append(inside, i)
 	}
 
 	out := make([]ClusterNode, 0, len(leafIdxs))
