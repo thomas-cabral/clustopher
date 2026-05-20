@@ -1,14 +1,15 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/signal"
-	"runtime/pprof"
 	"syscall"
+	"web/clustopher/cluster"
 	"web/clustopher/proto"
 	"web/clustopher/runner"
 
@@ -17,45 +18,37 @@ import (
 )
 
 func main() {
-
-	 // Create CPU profile
-	 f, err := os.Create("clustering_profile.pprof")
-	 if err != nil {
-		 log.Fatal(err)
-	 }
-	 
-	 // Start profiling
-	 if err := pprof.StartCPUProfile(f); err != nil {
-		 f.Close()
-		 log.Fatal(err)
-	 }
- 
-	 // Ensure cleanup happens
-	 defer func() {
-		 pprof.StopCPUProfile()
-		 f.Close()
-	 }()
-	// Parse command line flags
-	port := flag.Int("port", 50051, "The gRPC server port")
-	maxClusters := flag.Int("max-clusters", 5, "Maximum number of clusters to keep in memory")
+	port := flag.Int("port", 50051, "gRPC server port")
+	maxClusters := flag.Int("max-clusters", 5, "maximum number of cluster skeletons to keep in memory")
+	chDSN := flag.String("ch-dsn", os.Getenv("CLICKHOUSE_DSN"), "ClickHouse DSN (e.g. clickhouse://default:@localhost:9000/clustopher)")
 	flag.Parse()
 
-	// Create listener
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
-	if err != nil {
-		fmt.Printf("Failed to listen: %v\n", err)
-		os.Exit(1)
+	if *chDSN == "" {
+		log.Fatal("--ch-dsn or CLICKHOUSE_DSN required")
 	}
 
-	// Create gRPC server
-	s := grpc.NewServer()
-	clusterRunner := runner.NewClusterRunner(*maxClusters)
-	proto.RegisterClusterServiceServer(s, clusterRunner)
+	ctx := context.Background()
 
-	// Enable reflection for debugging
+	ch, err := cluster.NewCHClient(ctx, cluster.CHConfig{DSN: *chDSN})
+	if err != nil {
+		log.Fatalf("ch client: %v", err)
+	}
+	defer ch.Close()
+
+	if err := cluster.RunMigrations(ctx, ch.Conn(), "migrations"); err != nil {
+		log.Fatalf("migrations: %v", err)
+	}
+
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+
+	s := grpc.NewServer()
+	clusterRunner := runner.NewClusterRunner(*maxClusters, ch)
+	proto.RegisterClusterServiceServer(s, clusterRunner)
 	reflection.Register(s)
 
-	// Handle shutdown gracefully
 	go func() {
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
@@ -64,13 +57,8 @@ func main() {
 		s.GracefulStop()
 	}()
 
-	// Start server
 	fmt.Printf("Starting gRPC server on port %d...\n", *port)
 	if err := s.Serve(lis); err != nil {
-		fmt.Printf("Failed to serve: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("serve: %v", err)
 	}
-
-	pprof.StopCPUProfile()
-	f.Close()
 }

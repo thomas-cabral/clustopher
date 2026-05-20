@@ -2,15 +2,15 @@
 
 [![Go Tests](https://github.com/thomas-cabral/clustopher/actions/workflows/go-test.yml/badge.svg)](https://github.com/thomas-cabral/clustopher/actions/workflows/go-test.yml)
 
-Clustopher is a high-performance spatial clustering system designed to handle large-scale point datasets (30M+ points) with associated metrics and metadata. It implements a KD-tree based clustering approach similar to Mapbox's Supercluster, but with additional features for metric aggregation and metadata preservation.
+Clustopher is a high-performance spatial clustering system designed to handle large-scale point datasets (30M+ points) with associated metrics and metadata. It implements a KD-tree based clustering approach similar to Mapbox's Supercluster, with ClickHouse as the canonical data store for points and per-zoom aggregations.
 
 ## Key Features
 
 ### Spatial Clustering
-- Custom KD-tree implementation optimized for spatial data
-- Dynamic clustering based on zoom levels and viewport bounds
-- Efficient point aggregation for smooth map visualization
-- Support for 30M+ points while maintaining interactive performance
+- Bounds-only skeleton KD-tree in Go for fast spatial pruning at high zoom levels
+- ClickHouse materialized-view rollups for low-zoom aggregation
+- Dynamic routing between rollup and skeleton paths based on zoom level (`ZSplit`, default 11)
+- Support for 30M+ points while maintaining interactive query performance
 
 ### Metrics & Metadata
 - Support for arbitrary numeric metrics on points
@@ -19,9 +19,10 @@ Clustopher is a high-performance spatial clustering system designed to handle la
 - Real-time statistics and summaries for visible data
 
 ### Storage & Performance
-- Compressed storage of pre-computed trees using zstd
-- Fast loading of saved clusters for instant (based on cluster size) visualization
-- Efficient memory management for large datasets
+- Raw points stored in ClickHouse (`clustopher.points` MergeTree table)
+- Per-zoom rollup aggregations via ClickHouse materialized views (zoom 2–16)
+- In-memory skeleton tree (bounds-only leaf index) for spatial pruning at high zoom
+- SQL aggregation at low zoom; skeleton + CH point fetch at high zoom
 
 ### Interactive Visualization
 - Real-time map visualization using Mapbox GL
@@ -34,13 +35,15 @@ Clustopher is a high-performance spatial clustering system designed to handle la
 
 ### Backend (Go)
 - `cluster` package: Core clustering implementation
-  - KD-tree construction and querying
+  - Bounds-only skeleton KD-tree construction (`SkeletonTree`)
+  - ClickHouse client, ingest, and query logic
+  - Migrations embedded and applied at startup
   - Metric aggregation and rollup
-  - Compressed storage and loading
-- REST API Test endpoints for:
-  - Cluster creation and management
-  - Viewport-based querying
-  - Metadata and statistics
+- `runner` package: gRPC service wrapping `Supercluster`
+  - LRU skeleton cache (configurable max in-memory clusters)
+  - Cluster creation, listing, and querying over gRPC
+- `cmd/runners`: gRPC server entry point (requires `CLICKHOUSE_DSN`)
+- `cmd/api`: HTTP REST proxy to the gRPC runner (no direct CH access)
 
 ### Frontend (Svelte)
 - Interactive map visualization
@@ -48,16 +51,63 @@ Clustopher is a high-performance spatial clustering system designed to handle la
 - Real-time statistics display
 - Responsive layout and controls
 
+## Getting Started
+
+### Prerequisites
+- Go 1.21+
+- Node.js 18+
+- Docker (for ClickHouse)
+- Mapbox API key
+
+### Installation
+
+```bash
+# Start ClickHouse
+docker compose up -d clickhouse
+
+# Backend — gRPC runner (runs migrations on startup)
+CLICKHOUSE_DSN=clickhouse://default:@localhost:9000/clustopher \
+  go run ./cmd/runners
+
+# Backend — HTTP API (in a second terminal)
+go run ./cmd/api
+
+# Frontend
+cd frontend
+npm install
+npm run dev
+```
+
+### Configuration
+
+Environment variables:
+- `CLICKHOUSE_DSN`: ClickHouse connection string, e.g. `clickhouse://default:@localhost:9000/clustopher`
+- `VITE_MAPBOX_TOKEN`: Your Mapbox API key
+
+Runner flags (`cmd/runners`):
+- `--ch-dsn`: ClickHouse DSN (overrides `CLICKHOUSE_DSN`)
+- `--port`: gRPC listen port (default `50051`)
+- `--max-clusters`: maximum skeleton trees to keep in memory (default `5`)
+
+API flags (`cmd/api`):
+- `--runners-addr`: address of the gRPC runner (default `localhost:50051`)
+- `--port`: HTTP listen port (default `8000`)
+
+### Running Tests
+```bash
+CLICKHOUSE_DSN=clickhouse://default:@localhost:9000/clustopher_test go test ./... -count=1
+```
+
 ## Usage
 
 ### Creating a New Cluster
 1. Use the cluster management interface to specify point count
-2. System generates random test points within Continental US bounds
-3. Points are processed and stored in a compressed format
+2. System generates random test points within global bounds
+3. Points are projected, sorted into leaf order, and persisted to ClickHouse; a skeleton tree is built in memory
 
 ### Loading Existing Clusters
-1. View available clusters in the management interface
-2. Load a cluster for visualization
+1. View available clusters in the management interface (listed from CH)
+2. Load a cluster — skeleton tree is rebuilt from CH point data
 3. Interact with the map to explore data
 
 ### Exploring Data
@@ -66,63 +116,14 @@ Clustopher is a high-performance spatial clustering system designed to handle la
 - Hover over clusters/points to view detailed metrics
 - View real-time statistics for the current viewport
 
-## Future Enhancements
-
-### Planned Features
-- Distributed architecture with worker nodes
-- gRPC communication between components
-- Multiple concurrent cluster support
-- Custom point generation and import
-- Advanced metric aggregation options
-
-### Scaling Considerations
-Currently limited to single-server deployment. Future versions will implement:
-- Worker pool for distributed processing
-- Load balancing across cluster nodes
-- Shared storage for cluster data
-- Horizontal scaling capabilities
-
 ## Technical Details
 
 ### Performance Characteristics
-- Memory Usage: ~2GB for 1M points with metrics
-- Load Time: ~30s for 1M points (initial clustering)
-- Query Time: <50ms for typical viewport operations
-- Storage: ~100MB per 1M points (compressed)
+
+TBD — updated post-15M-point benchmark; see `benchmark_results/ch_15M.txt` once available.
 
 ### Limitations
-- Single cluster loaded at a time
-- In-memory processing only
-- Limited to pre-generated test data
-- Single-server deployment
-
-## Getting Started
-
-### Prerequisites
-- Go 1.21+
-- Node.js 18+
-- Mapbox API key
-
-### Installation
-
-```bash
-Backend
-cd clustopher
-go mod download
-go run main.go
-
-Frontend
-cd frontend
-npm install
-npm run dev
-```
-
-
-### Configuration
-Set the following environment variables:
-- `VITE_MAPBOX_TOKEN`: Your Mapbox API key
-
-### Running Tests
-```bash
-go test
-```
+- Single-node ClickHouse only; no distributed CH support
+- No point-level updates: reloading a cluster drops its CH partition and reinserts all points
+- Metric aggregations are sum/avg only (no arbitrary aggregation functions)
+- Skeleton tree is rebuilt from CH on first access after process restart or LRU eviction

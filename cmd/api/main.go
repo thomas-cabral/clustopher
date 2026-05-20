@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -55,8 +56,12 @@ func getBoundsFromQuery(c *gin.Context) (*proto.Bounds, error) {
 }
 
 func main() {
+	runnersAddr := flag.String("runners-addr", "localhost:50051", "address of the cluster runners gRPC server")
+	apiPort := flag.String("port", "8000", "HTTP API listen port")
+	flag.Parse()
+
 	// Connect to cluster runner
-	conn, err := grpc.Dial("localhost:50051", grpc.WithInsecure())
+	conn, err := grpc.Dial(*runnersAddr, grpc.WithInsecure())
 	if err != nil {
 		fmt.Printf("Failed to connect to cluster runner: %v\n", err)
 		os.Exit(1)
@@ -190,8 +195,8 @@ func main() {
 
 	// Start server in a goroutine
 	go func() {
-		fmt.Println("Starting server on :8000...")
-		if err := r.Run(":8000"); err != nil {
+		fmt.Printf("Starting HTTP server on :%s...\n", *apiPort)
+		if err := r.Run(":" + *apiPort); err != nil {
 			fmt.Printf("Server error: %v\n", err)
 		}
 	}()
