@@ -2559,3 +2559,41 @@ func (sc *Supercluster) ClusterPoints(points []KDPoint, zoom int) []ClusterNode 
 	}
 	return sc.clusterPoints(points, radius)
 }
+
+// Open rebuilds the skeleton tree from CH for an existing cluster. Points
+// are streamed in (cluster_id, id) order — that order is already leaf-order
+// because Load wrote them that way — so the build is a single linear pass.
+func (sc *Supercluster) Open(ctx context.Context) error {
+	if sc.ch == nil {
+		return fmt.Errorf("Open requires CH client; call SetCHClient first")
+	}
+	if sc.clusterID == "" {
+		return fmt.Errorf("Open requires clusterID")
+	}
+
+	rows, err := sc.ch.Conn().Query(ctx,
+		"SELECT id, x, y FROM clustopher.points WHERE cluster_id = ? ORDER BY id", sc.clusterID)
+	if err != nil {
+		return fmt.Errorf("query points: %w", err)
+	}
+	defer rows.Close()
+
+	var projected []KDPoint
+	for rows.Next() {
+		var id uint32
+		var x, y float32
+		if err := rows.Scan(&id, &x, &y); err != nil {
+			return fmt.Errorf("scan: %w", err)
+		}
+		proj := sc.projectFast(x, y, sc.Options.MaxZoom)
+		projected = append(projected, KDPoint{ID: id, X: proj[0], Y: proj[1], NumPoints: 1})
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("rows iter: %w", err)
+	}
+
+	// Points are already in leaf order (we wrote them that way). BuildSkeleton
+	// accepts pre-sorted input.
+	sc.Skeleton = BuildSkeleton(projected, sc.Options.NodeSize)
+	return nil
+}

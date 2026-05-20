@@ -83,6 +83,58 @@ func TestSuperclusterLoad_WritesToCH(t *testing.T) {
 	_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.points DROP PARTITION 'TEST_LOAD'")
 }
 
+func TestSuperclusterOpen_RebuildsSkeleton(t *testing.T) {
+	dsn := os.Getenv("CLICKHOUSE_DSN")
+	if dsn == "" {
+		t.Skip("CLICKHOUSE_DSN not set")
+	}
+	ctx := context.Background()
+	c, err := NewCHClient(ctx, CHConfig{DSN: dsn})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	defer c.Close()
+	if err := RunMigrations(ctx, c.Conn(), "migrations"); err != nil {
+		t.Fatalf("migrations: %v", err)
+	}
+	_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.points DROP PARTITION 'TEST_OPEN'")
+
+	sc1 := NewSupercluster(SuperclusterOptions{
+		MinZoom: 0, MaxZoom: 16, MinPoints: 3, Radius: 40,
+		Extent: 512, NodeSize: 64,
+	})
+	sc1.SetCHClient(c)
+	sc1.SetClusterID("TEST_OPEN")
+	pts := generateRandomPoints(5000, -125, -65, 25, 49)
+	if err := sc1.Load(pts); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	leafCount1 := len(sc1.Skeleton.Leaves)
+
+	sc2 := NewSupercluster(sc1.Options)
+	sc2.SetCHClient(c)
+	sc2.SetClusterID("TEST_OPEN")
+	if err := sc2.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	if sc2.Skeleton == nil {
+		t.Fatal("Skeleton nil after Open")
+	}
+	if len(sc2.Skeleton.Leaves) != leafCount1 {
+		t.Fatalf("leaves: %d vs %d", len(sc2.Skeleton.Leaves), leafCount1)
+	}
+	var sum uint32
+	for _, l := range sc2.Skeleton.Leaves {
+		sum += l.Count
+	}
+	if sum != 5000 {
+		t.Fatalf("skeleton total = %d", sum)
+	}
+
+	_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.points DROP PARTITION 'TEST_OPEN'")
+}
+
 func TestInsertPoints_TriggersRollupMVs(t *testing.T) {
 	dsn := os.Getenv("CLICKHOUSE_DSN")
 	if dsn == "" {
