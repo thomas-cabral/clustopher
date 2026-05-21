@@ -14,7 +14,7 @@ The motivation was a pure in-memory predecessor (KD-tree + grid clustering + zst
 - Bounds-only skeleton KD-tree in Go for fast spatial pruning at high zoom levels
 - ClickHouse materialized-view rollups for low-zoom aggregation
 - Dynamic routing between rollup and skeleton paths based on zoom level (`ZSplit`, default 11)
-- Support for 30M+ points while maintaining interactive query performance
+- Verified at 300 M points with sub-20 ms low/mid-zoom queries and 137 ms at z14 city viewport on a single box
 
 ### Metrics & Metadata
 - Support for arbitrary numeric metrics on points
@@ -124,25 +124,51 @@ CLICKHOUSE_DSN=clickhouse://default:@localhost:9000/clustopher_test go test ./..
 
 ### Performance Characteristics
 
-Measured on AMD Ryzen 9 5900X (24 threads), single-node ClickHouse 24.8 in Docker, 15,000,000 random points across the CONUS bounding box. Viewports are zoom-appropriate (continental at low zoom, neighborhood at high zoom):
+Measured on AMD Ryzen 9 5900X (24 threads), single-node ClickHouse 24.8 in Docker, random points uniformly distributed across the CONUS bounding box. Viewports are zoom-appropriate (continental at low zoom, state at mid zoom, city at high zoom):
 
-| Zoom | Viewport          | `GetClusters` | Heap alloc / op |
-|------|-------------------|---------------|-----------------|
-| 2    | CONUS (60° × 24°) | **3.3 ms**    | 0.13 MB         |
-| 8    | State (5° × 5°)   | **7.4 ms**    | 3.4 MB          |
-| 14   | City (0.05° × 0.05°) | **59.7 ms** | 0.09 MB         |
+#### Scale (load + storage)
 
-Comparison to the pre-ClickHouse baseline (in-memory KD-tree + grid clustering, full CONUS bbox at every zoom — see `benchmark_results/baseline_15M.txt`):
+| Points | CH stage gen | Load (skeleton + canonical points) | Rollup OPTIMIZE FINAL | Resident heap after load | Skeleton leaves |
+|--------|-------------:|-----------------------------------:|----------------------:|-------------------------:|----------------:|
+|   5 M  |   0.7 s |    9.2 s |   17.1 s |   18 MB |  78 K |
+|  15 M  |   1.8 s |   28.6 s |   43.8 s |   33 MB | 234 K |
+|  50 M  |   6.3 s |  103.1 s |  117.6 s |   83 MB | 781 K |
+| 100 M  |  12.2 s |  216.4 s |  212.5 s |  176 MB | 1.5 M |
+| 200 M  |  26.2 s |  536.2 s |  444.2 s |  334 MB | 3.1 M |
+| 300 M  |  45.3 s |  833.7 s |  569.0 s |  444 MB | 4.7 M |
 
-| Zoom | Old (full bbox) | New (zoom-appropriate viewport) | Speedup |
-|------|-----------------|---------------------------------|---------|
-| 2    | 30.35 s         | 3.3 ms                          | ~9 200× |
-| 8    | 18.19 s         | 7.4 ms                          | ~2 460× |
-| 14   | 67.42 s         | 59.7 ms                         | ~1 130× |
+Resident heap is what the skeleton tree pins after `LoadFromCHStaging` + GC. Raw points live in ClickHouse; Go holds only the bounds-only leaf index. Rollup `OPTIMIZE FINAL` collapses per-insert parts into a single sorted run per zoom partition — needed once after bulk load so the rollup path scans contiguous data.
 
-Note: the two columns are not strictly apples-to-apples — the old benchmarks always queried the full CONUS bbox, which is unrealistic at z14 where a real viewport is one neighborhood. With zoom-appropriate viewports the new system stays interactive across the entire zoom range.
+#### Query latency (`GetClustersCH`, 5-iter warm avg)
 
-Raw results: `benchmark_results/ch_15M.txt`.
+| Points | z2 / CONUS 60°×24° | z8 / state 5°×5° | z14 / city 0.5°×0.5° | z14 clusters returned | z14 alloc/op |
+|--------|-------------------:|-----------------:|---------------------:|----------------------:|-------------:|
+|   5 M  |  **2.9 ms** | **10.5 ms** |   **3.3 ms** |   1 600 |  0.48 MB |
+|  15 M  |  **5.5 ms** | **12.9 ms** |   **6.6 ms** |   3 772 |  1.33 MB |
+|  50 M  |  **3.7 ms** | **10.4 ms** |  **13.3 ms** |  11 395 |  4.20 MB |
+| 100 M  |  **3.6 ms** | **10.2 ms** |  **29.0 ms** |  20 795 |  8.80 MB |
+| 200 M  |  **3.5 ms** | **14.9 ms** |  **69.1 ms** |  34 408 | 15.07 MB |
+| 300 M  |  **3.7 ms** | **16.5 ms** | **136.8 ms** |  44 683 | 20.46 MB |
+
+z2 and z8 (`zoom < ZSplit`, default 11) hit the per-zoom rollup materialized views in ClickHouse: latency is flat across the entire size range because a rollup-row count is bounded by the zoom-tile grid, not the underlying point count.
+
+z14 (`zoom >= ZSplit`) walks the in-memory skeleton tree, fetches the matching leaf-id ranges from ClickHouse, and runs the Supercluster-style radius clustering on the returned points. Latency scales with the *density of points inside the viewport* — at 300 M CONUS points the 0.5° × 0.5° viewport contains ≈ 50 K points, and the system returns 44 683 clusters in 137 ms (95 % of which is `fetchLeafPoints` + `clusterPoints`).
+
+#### Limits encountered
+
+300 M is the realistic ceiling on this hardware (94 GB RAM) with the current Load path. During `LoadFromCHStaging` Go materializes one `[]chSpatialRow` (12 B/row) and one `[]KDPoint` (16 B/row), and the `INSERT … SELECT … JOIN staging ⨝ id_map` runs server-side. Even with the in-place skeleton sort (introduced for this scale push) and `join_algorithm='full_sorting_merge'` (which bounds CH-server JOIN RAM), 500 M points combined Go heap (~14 GB) + ClickHouse working set + OS page cache for the ~50 GB staging partition exhaust RAM. Pushing past 300 M needs a streaming Load path: project rows on read, drop the spatial slice, keep external IDs as a packed `[]uint32`. That's the next optimization target.
+
+#### Comparison to the pre-ClickHouse baseline (15 M points)
+
+| Zoom | Old (full bbox, in-memory KD-tree) | New (zoom-appropriate viewport, CH-backed) | Speedup |
+|------|-----------------------------------:|-------------------------------------------:|--------:|
+| 2    | 30.35 s | 5.5 ms |  ~5 500× |
+| 8    | 18.19 s | 12.9 ms |  ~1 400× |
+| 14   | 67.42 s | 6.6 ms | ~10 200× |
+
+Columns are not strictly apples-to-apples — the old benchmarks always queried the full CONUS bbox, unrealistic at z14 where a real viewport is one neighborhood. With zoom-appropriate viewports the new system stays interactive across the entire zoom range, and now scales to 20× the point count of the old in-memory system (300 M vs ~15 M before the heap blew up).
+
+Raw results: `benchmark_results/scale_full_rerun.txt`, `benchmark_results/baseline_15M.txt`.
 
 ### Limitations
 - Single-node ClickHouse only; no distributed CH support

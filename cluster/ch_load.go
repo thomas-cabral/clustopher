@@ -44,7 +44,8 @@ func (sc *Supercluster) LoadFromCHStaging(ctx context.Context) error {
 
 	projected := sc.projectStagingSpatial(spatial)
 
-	sorted := SortPointsIntoLeafOrderParallel(projected, sc.Options.NodeSize)
+	sorted := SortPointsIntoLeafOrderParallelInPlace(projected, sc.Options.NodeSize)
+	projected = nil
 	tree, remap := BuildSkeletonWithRemap(sorted, sc.Options.NodeSize)
 	sc.Skeleton = tree
 
@@ -255,7 +256,19 @@ func (sc *Supercluster) writePointIDMapBatch(ctx context.Context, ch *CHClient, 
 }
 
 func (sc *Supercluster) populatePointsFromStaging(ctx context.Context, loadID uint64) error {
-	ctx = clickhouse.Context(ctx, clickhouse.WithSettings(insertSettings))
+	// Merge insertSettings with merge-join settings so the staging x id_map join
+	// streams through sort-merge instead of building a full hash table on one
+	// side. At >100M rows a hash join needs 10-20 GB of CH server RAM; merge
+	// join keeps the working set bounded to a few hundred MB.
+	settings := clickhouse.Settings{}
+	for k, v := range insertSettings {
+		settings[k] = v
+	}
+	settings["join_algorithm"] = "full_sorting_merge"
+	settings["max_bytes_before_external_sort"] = uint64(8 * 1024 * 1024 * 1024)
+	settings["max_bytes_before_external_group_by"] = uint64(8 * 1024 * 1024 * 1024)
+
+	ctx = clickhouse.Context(ctx, clickhouse.WithSettings(settings))
 	if err := sc.ch.Conn().Exec(ctx, `
         INSERT INTO clustopher.points (cluster_id, id, external_id, x, y, metrics, metadata)
         SELECT

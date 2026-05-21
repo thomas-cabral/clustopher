@@ -344,14 +344,19 @@ func benchmarkClusteringCHFirstStaged(b *testing.B, clusterID string, n int, bou
 
 func generateDenseStagingPoints(ctx context.Context, c *CHClient, clusterID string, n int, bounds KDBounds) error {
 	ctx = clickhouse.Context(ctx, clickhouse.WithSettings(insertSettings))
+	// NB: previously used `randCanonical()` for x and y in the same SELECT; the
+	// CH planner folded the two calls into a single value, so every generated
+	// point landed on the diagonal `y = MinY + (x-MinX) * (MaxY-MinY)/(MaxX-MinX)`.
+	// Use cityHash64(number, salt) with distinct salts per axis so x, y, and the
+	// metric draw are independent uniform variates.
 	return c.Conn().Exec(ctx, `
         INSERT INTO clustopher.staging_points (cluster_id, external_id, x, y, metrics, metadata)
         SELECT
             ? AS cluster_id,
             toUInt32(number + 1) AS external_id,
-            toFloat32(? + randCanonical() * (? - ?)) AS x,
-            toFloat32(? + randCanonical() * (? - ?)) AS y,
-            map('value', toFloat32(randCanonical() * 100)) AS metrics,
+            toFloat32(? + (cityHash64(number, 1) / 18446744073709551615.0) * (? - ?)) AS x,
+            toFloat32(? + (cityHash64(number, 2) / 18446744073709551615.0) * (? - ?)) AS y,
+            map('value', toFloat32((cityHash64(number, 3) / 18446744073709551615.0) * 100)) AS metrics,
             map('type', 'test') AS metadata
         FROM numbers(?)
     `, clusterID, bounds.MinX, bounds.MaxX, bounds.MinX, bounds.MinY, bounds.MaxY, bounds.MinY, uint64(n))

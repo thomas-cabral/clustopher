@@ -88,7 +88,7 @@ func TestSortPointsIntoLeafOrderParallel_MatchesSequential(t *testing.T) {
 	}
 
 	want := SortPointsIntoLeafOrder(pts, 16)
-	got := sortPointsIntoLeafOrderParallel(pts, 16, 64)
+	got := sortPointsIntoLeafOrderParallel(pts, 16, 64, true)
 	for i := range want {
 		if got[i].ID != want[i].ID {
 			t.Fatalf("point %d id = %d, want %d", i, got[i].ID, want[i].ID)

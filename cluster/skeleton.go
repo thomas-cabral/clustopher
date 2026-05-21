@@ -155,18 +155,30 @@ func SortPointsIntoLeafOrder(points []KDPoint, nodeSize int) []KDPoint {
 }
 
 func SortPointsIntoLeafOrderParallel(points []KDPoint, nodeSize int) []KDPoint {
-	return sortPointsIntoLeafOrderParallel(points, nodeSize, parallelSortThreshold)
+	return sortPointsIntoLeafOrderParallel(points, nodeSize, parallelSortThreshold, true)
 }
 
-func sortPointsIntoLeafOrderParallel(points []KDPoint, nodeSize, threshold int) []KDPoint {
+// SortPointsIntoLeafOrderParallelInPlace mutates the input slice in place and
+// returns it. Skips the full-slice copy that SortPointsIntoLeafOrderParallel
+// makes for safety, halving peak heap on multi-hundred-million-point loads.
+func SortPointsIntoLeafOrderParallelInPlace(points []KDPoint, nodeSize int) []KDPoint {
+	return sortPointsIntoLeafOrderParallel(points, nodeSize, parallelSortThreshold, false)
+}
+
+func sortPointsIntoLeafOrderParallel(points []KDPoint, nodeSize, threshold int, copyInput bool) []KDPoint {
 	if nodeSize < 1 {
 		nodeSize = 1
 	}
 	if threshold < 1 {
 		threshold = 1
 	}
-	out := make([]KDPoint, len(points))
-	copy(out, points)
+	var out []KDPoint
+	if copyInput {
+		out = make([]KDPoint, len(points))
+		copy(out, points)
+	} else {
+		out = points
+	}
 	if len(out) == 0 {
 		return out
 	}
