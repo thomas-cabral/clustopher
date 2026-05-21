@@ -65,8 +65,27 @@ func BuildSkeleton(points []KDPoint, nodeSize int) *SkeletonTree {
 		tree.Leaves = append(tree.Leaves, leaf)
 	}
 
-	// 2. Build internal nodes bottom-up. Each leaf becomes a SkeletonNode with
-	//    LeafIdx set; we then pair them into a balanced binary tree.
+	buildInternalNodes(tree)
+	return tree
+}
+
+// BuildSkeletonFromLeaves takes an already-emitted []SkeletonLeaf (e.g. built
+// from a streaming sort) and lays out the SkeletonNode array (leaves first,
+// then the bottom-up balanced binary internal tree). Equivalent to calling
+// BuildSkeleton on the underlying points except no points are materialized.
+func BuildSkeletonFromLeaves(leaves []SkeletonLeaf) *SkeletonTree {
+	tree := &SkeletonTree{Leaves: leaves}
+	if len(leaves) == 0 {
+		return tree
+	}
+	buildInternalNodes(tree)
+	return tree
+}
+
+// buildInternalNodes assumes tree.Leaves is populated and tree.Nodes is empty.
+// It appends one SkeletonNode per leaf, then pairs them bottom-up into a
+// balanced binary tree.
+func buildInternalNodes(tree *SkeletonTree) {
 	type lvl struct{ idx int32 }
 	current := make([]lvl, len(tree.Leaves))
 	for i, lf := range tree.Leaves {
@@ -98,7 +117,6 @@ func BuildSkeleton(points []KDPoint, nodeSize int) *SkeletonTree {
 		axis ^= 1
 		current = next
 	}
-	return tree
 }
 
 func boundsOver(pts []KDPoint) KDBounds {

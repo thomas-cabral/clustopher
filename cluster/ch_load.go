@@ -269,6 +269,12 @@ func (sc *Supercluster) populatePointsFromStaging(ctx context.Context, loadID ui
 	settings["max_bytes_before_external_group_by"] = uint64(8 * 1024 * 1024 * 1024)
 
 	ctx = clickhouse.Context(ctx, clickhouse.WithSettings(settings))
+	// No ORDER BY internal_id in the SELECT: MergeTree sorts blocks by the
+	// table's ORDER BY (cluster_id, id) on insert anyway. Forcing a full
+	// re-sort of the join output costs an extra N-row sort buffer on the CH
+	// server (~70 GB peak at 500M, blows past system RAM at 1B+). Without it
+	// CH inserts in join-stream order and merges into the final sorted parts
+	// in the background.
 	if err := sc.ch.Conn().Exec(ctx, `
         INSERT INTO clustopher.points (cluster_id, id, external_id, x, y, metrics, metadata)
         SELECT
@@ -284,7 +290,6 @@ func (sc *Supercluster) populatePointsFromStaging(ctx context.Context, loadID ui
             ON s.external_id = m.external_id
         WHERE s.cluster_id = ?
           AND m.load_id = ?
-        ORDER BY m.internal_id
     `, sc.clusterID, loadID); err != nil {
 		return fmt.Errorf("populate points from staging: %w", err)
 	}

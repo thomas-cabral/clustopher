@@ -124,15 +124,26 @@ func TestScalePerf(t *testing.T) {
 		sc.SetClusterID(clusterID)
 
 		loadStart := time.Now()
-		if err := sc.LoadFromCHStaging(ctx); err != nil {
-			res.err = fmt.Sprintf("load: %v", err)
+		streaming := os.Getenv("CLUSTOPHER_SCALE_STREAMING") == "1"
+		var loadErr error
+		if streaming {
+			loadErr = sc.LoadFromCHStreaming(ctx)
+		} else {
+			loadErr = sc.LoadFromCHStaging(ctx)
+		}
+		if loadErr != nil {
+			res.err = fmt.Sprintf("load: %v", loadErr)
 			results = append(results, res)
 			cleanup()
 			t.Logf("FAIL %s: %s", humanCount(n), res.err)
 			continue
 		}
 		res.loadSec = time.Since(loadStart).Seconds()
-		t.Logf("loaded %s points (CH-first) in %.1fs", humanCount(n), res.loadSec)
+		loadPath := "KD"
+		if streaming {
+			loadPath = "Morton-stream"
+		}
+		t.Logf("loaded %s points (%s) in %.1fs", humanCount(n), loadPath, res.loadSec)
 
 		// Free intermediates and force GC so the resident-after-load measurement
 		// reflects what the skeleton actually pins.
