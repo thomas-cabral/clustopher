@@ -1,0 +1,947 @@
+[
+  {
+    "ID": 34208,
+    "X": -121.96603,
+    "Y": 27.8834,
+    "Count": 2589,
+    "Children": null,
+    "Metrics": {
+      "value": 130945.17
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 89514,
+    "X": -117.6101,
+    "Y": 29.350367,
+    "Count": 1140,
+    "Children": null,
+    "Metrics": {
+      "value": 58156.324
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 72311,
+    "X": -117.24417,
+    "Y": 32.70476,
+    "Count": 1254,
+    "Children": null,
+    "Metrics": {
+      "value": 63297.39
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 63361,
+    "X": -110.23707,
+    "Y": 27.787388,
+    "Count": 4920,
+    "Children": null,
+    "Metrics": {
+      "value": 244454.42
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 96629,
+    "X": -116.83343,
+    "Y": 31.042675,
+    "Count": 2641,
+    "Children": null,
+    "Metrics": {
+      "value": 133788.03
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 75469,
+    "X": -121.725815,
+    "Y": 36.69265,
+    "Count": 4727,
+    "Children": null,
+    "Metrics": {
+      "value": 235573.89
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 63463,
+    "X": -115.68816,
+    "Y": 33.84416,
+    "Count": 4760,
+    "Children": null,
+    "Metrics": {
+      "value": 240986.19
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 7767,
+    "X": -106.89286,
+    "Y": 29.857859,
+    "Count": 577,
+    "Children": null,
+    "Metrics": {
+      "value": 28778.574
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 62383,
+    "X": -100.394745,
+    "Y": 28.287706,
+    "Count": 3171,
+    "Children": null,
+    "Metrics": {
+      "value": 157849.42
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 56143,
+    "X": -95.35188,
+    "Y": 27.916937,
+    "Count": 5381,
+    "Children": null,
+    "Metrics": {
+      "value": 266003.44
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 19618,
+    "X": -101.623795,
+    "Y": 32.809216,
+    "Count": 969,
+    "Children": null,
+    "Metrics": {
+      "value": 50607.113
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 377,
+    "X": -106.31892,
+    "Y": 31.317074,
+    "Count": 12,
+    "Children": null,
+    "Metrics": {
+      "value": 557.3057
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 37399,
+    "X": -109.19311,
+    "Y": 36.653538,
+    "Count": 8687,
+    "Children": null,
+    "Metrics": {
+      "value": 432378.44
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 67651,
+    "X": -103.89522,
+    "Y": 35.695034,
+    "Count": 89,
+    "Children": null,
+    "Metrics": {
+      "value": 4319.738
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 35566,
+    "X": -121.97772,
+    "Y": 37.56654,
+    "Count": 4297,
+    "Children": null,
+    "Metrics": {
+      "value": 213792.22
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 4518,
+    "X": -118.460236,
+    "Y": 40.63439,
+    "Count": 138,
+    "Children": null,
+    "Metrics": {
+      "value": 7343.9214
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 80550,
+    "X": -110.48274,
+    "Y": 37.52111,
+    "Count": 8570,
+    "Children": null,
+    "Metrics": {
+      "value": 426268.88
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 78237,
+    "X": -116.342514,
+    "Y": 41.11397,
+    "Count": 258,
+    "Children": null,
+    "Metrics": {
+      "value": 13347.063
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 35891,
+    "X": -106.80332,
+    "Y": 43.300564,
+    "Count": 1037,
+    "Children": null,
+    "Metrics": {
+      "value": 51178.15
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 77237,
+    "X": -124.54901,
+    "Y": 43.232494,
+    "Count": 27,
+    "Children": null,
+    "Metrics": {
+      "value": 1499.8555
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 67486,
+    "X": -121.63785,
+    "Y": 46.559444,
+    "Count": 2451,
+    "Children": null,
+    "Metrics": {
+      "value": 120181.55
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 398,
+    "X": -116.12746,
+    "Y": 44.677258,
+    "Count": 4332,
+    "Children": null,
+    "Metrics": {
+      "value": 217823.27
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 27257,
+    "X": -109.68726,
+    "Y": 42.8868,
+    "Count": 908,
+    "Children": null,
+    "Metrics": {
+      "value": 44880.45
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 1619,
+    "X": -109.88365,
+    "Y": 37.26503,
+    "Count": 8633,
+    "Children": null,
+    "Metrics": {
+      "value": 431083.34
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 33306,
+    "X": -102.42827,
+    "Y": 37.653893,
+    "Count": 1616,
+    "Children": null,
+    "Metrics": {
+      "value": 82759.84
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 98672,
+    "X": -95.51809,
+    "Y": 37.520557,
+    "Count": 8384,
+    "Children": null,
+    "Metrics": {
+      "value": 420539.03
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 33267,
+    "X": -102.54142,
+    "Y": 43.147293,
+    "Count": 3025,
+    "Children": null,
+    "Metrics": {
+      "value": 152548.9
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 75995,
+    "X": -95.57958,
+    "Y": 43.58074,
+    "Count": 214,
+    "Children": null,
+    "Metrics": {
+      "value": 10790.376
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 95987,
+    "X": -109.22728,
+    "Y": 46.928352,
+    "Count": 3674,
+    "Children": null,
+    "Metrics": {
+      "value": 185250.86
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 54754,
+    "X": -102.70814,
+    "Y": 44.024837,
+    "Count": 3292,
+    "Children": null,
+    "Metrics": {
+      "value": 166659.97
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 40593,
+    "X": -95.58894,
+    "Y": 43.579147,
+    "Count": 215,
+    "Children": null,
+    "Metrics": {
+      "value": 10834.235
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 23510,
+    "X": -94.75898,
+    "Y": 27.66558,
+    "Count": 4820,
+    "Children": null,
+    "Metrics": {
+      "value": 238227.86
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 88357,
+    "X": -87.68668,
+    "Y": 31.422136,
+    "Count": 88,
+    "Children": null,
+    "Metrics": {
+      "value": 4343.6426
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 7837,
+    "X": -80.60227,
+    "Y": 27.699602,
+    "Count": 4939,
+    "Children": null,
+    "Metrics": {
+      "value": 244347.48
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 87034,
+    "X": -87.17853,
+    "Y": 30.763393,
+    "Count": 2194,
+    "Children": null,
+    "Metrics": {
+      "value": 109638.1
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 40037,
+    "X": -94.15599,
+    "Y": 36.37204,
+    "Count": 8537,
+    "Children": null,
+    "Metrics": {
+      "value": 425349.78
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 18193,
+    "X": -86.91102,
+    "Y": 33.054527,
+    "Count": 943,
+    "Children": null,
+    "Metrics": {
+      "value": 47160.9
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 90300,
+    "X": -82.908165,
+    "Y": 27.725712,
+    "Count": 2493,
+    "Children": null,
+    "Metrics": {
+      "value": 124660.12
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 5770,
+    "X": -68.3408,
+    "Y": 28.031654,
+    "Count": 2999,
+    "Children": null,
+    "Metrics": {
+      "value": 148069.23
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 66093,
+    "X": -74.16344,
+    "Y": 29.990112,
+    "Count": 5086,
+    "Children": null,
+    "Metrics": {
+      "value": 251367.9
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 98398,
+    "X": -79.131546,
+    "Y": 36.177376,
+    "Count": 8544,
+    "Children": null,
+    "Metrics": {
+      "value": 427717.47
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 2933,
+    "X": -72.33536,
+    "Y": 38.263203,
+    "Count": 140,
+    "Children": null,
+    "Metrics": {
+      "value": 7412.5513
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 67879,
+    "X": -94.73239,
+    "Y": 37.26279,
+    "Count": 8450,
+    "Children": null,
+    "Metrics": {
+      "value": 421915.25
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 48736,
+    "X": -87.48503,
+    "Y": 40.26949,
+    "Count": 1641,
+    "Children": null,
+    "Metrics": {
+      "value": 80526.98
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 66057,
+    "X": -98.33963,
+    "Y": 44.267036,
+    "Count": 753,
+    "Children": null,
+    "Metrics": {
+      "value": 37955.434
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 37213,
+    "X": -80.53752,
+    "Y": 37.32673,
+    "Count": 8379,
+    "Children": null,
+    "Metrics": {
+      "value": 419823.34
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 58115,
+    "X": -87.47676,
+    "Y": 42.898376,
+    "Count": 2661,
+    "Children": null,
+    "Metrics": {
+      "value": 133337.4
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 16056,
+    "X": -80.487854,
+    "Y": 43.490448,
+    "Count": 224,
+    "Children": null,
+    "Metrics": {
+      "value": 11069.248
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 99764,
+    "X": -96.02637,
+    "Y": 43.92692,
+    "Count": 91,
+    "Children": null,
+    "Metrics": {
+      "value": 4839.3975
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 52622,
+    "X": -94.17993,
+    "Y": 46.90676,
+    "Count": 3845,
+    "Children": null,
+    "Metrics": {
+      "value": 190592.56
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 80222,
+    "X": -87.61057,
+    "Y": 44.089428,
+    "Count": 3019,
+    "Children": null,
+    "Metrics": {
+      "value": 151206.22
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 28426,
+    "X": -80.512726,
+    "Y": 43.490486,
+    "Count": 227,
+    "Children": null,
+    "Metrics": {
+      "value": 11205.498
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 10310,
+    "X": -79.649086,
+    "Y": 37.537464,
+    "Count": 8359,
+    "Children": null,
+    "Metrics": {
+      "value": 417144.22
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 94438,
+    "X": -71.92425,
+    "Y": 40.091763,
+    "Count": 377,
+    "Children": null,
+    "Metrics": {
+      "value": 19218.947
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 95890,
+    "X": -80.503,
+    "Y": 43.49234,
+    "Count": 226,
+    "Children": null,
+    "Metrics": {
+      "value": 11196.576
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 98040,
+    "X": -68.22982,
+    "Y": 36.965984,
+    "Count": 4683,
+    "Children": null,
+    "Metrics": {
+      "value": 231270.77
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 85060,
+    "X": -73.8896,
+    "Y": 41.594963,
+    "Count": 4678,
+    "Children": null,
+    "Metrics": {
+      "value": 234389.58
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 24003,
+    "X": -65.61316,
+    "Y": 45.589756,
+    "Count": 390,
+    "Children": null,
+    "Metrics": {
+      "value": 18419.41
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 72861,
+    "X": -80.487854,
+    "Y": 43.490448,
+    "Count": 224,
+    "Children": null,
+    "Metrics": {
+      "value": 11069.248
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 96578,
+    "X": -79.05542,
+    "Y": 46.8321,
+    "Count": 4046,
+    "Children": null,
+    "Metrics": {
+      "value": 199836.83
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 1088,
+    "X": -71.33801,
+    "Y": 44.668858,
+    "Count": 4437,
+    "Children": null,
+    "Metrics": {
+      "value": 222026.84
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 10137,
+    "X": -67.656784,
+    "Y": 43.466766,
+    "Count": 875,
+    "Children": null,
+    "Metrics": {
+      "value": 42614.24
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  },
+  {
+    "ID": 35128,
+    "X": -66.03391,
+    "Y": 48.521286,
+    "Count": 147,
+    "Children": null,
+    "Metrics": {
+      "value": 8321.462
+    },
+    "Metadata": {
+      "type": {
+        "test": 1
+      }
+    }
+  }
+]

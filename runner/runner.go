@@ -3,9 +3,8 @@ package runner
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
+	"runtime"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -21,87 +20,15 @@ type ClusterRunner struct {
 	clusterLock  sync.RWMutex
 	lastAccessed map[string]time.Time
 	maxClusters  int
+	ch           *cluster.CHClient
 }
 
-// ... (previous functions remain the same until CreateCluster) ...
-
-func (r *ClusterRunner) CreateCluster(ctx context.Context, req *pb.CreateClusterRequest) (*pb.CreateClusterResponse, error) {
-	fmt.Printf("Creating new cluster with %d points\n", req.NumPoints)
-
-	// Generate test points
-	bounds := cluster.KDBounds{
-		MinX: -180.0,
-		MinY: -90.0,
-		MaxX: 180.0,
-		MaxY: 90.0,
-	}
-
-	points := cluster.GenerateTestPoints(int(req.NumPoints), bounds)
-
-	// Create supercluster with default options
-	options := cluster.SuperclusterOptions{
-		MinZoom:   0,
-		MaxZoom:   16,
-		MinPoints: 2,
-		Radius:    100,
-		Extent:    512,
-		NodeSize:  64,
-		Log:       true,
-	}
-
-	supercluster := cluster.NewSupercluster(options)
-	supercluster.Load(points)
-
-	// Generate filename with timestamp and UUID
-	savePath := generateClusterFilename(int(req.NumPoints))
-	fmt.Printf("Saving new cluster to %s...\n", savePath)
-
-	// Save the cluster
-	if err := supercluster.SaveCompressed(savePath); err != nil {
-		return nil, fmt.Errorf("failed to save cluster: %v", err)
-	}
-
-	// Extract ID from filename
-	// Format: cluster-{numPoints}p-{timestamp}-{id}.zst
-	parts := strings.Split(filepath.Base(savePath), "-")
-	if len(parts) != 5 {
-		return nil, fmt.Errorf("invalid filename format")
-	}
-	id := strings.TrimSuffix(parts[4], ".zst")
-
-	// Add to loaded clusters
-	r.clusterLock.Lock()
-	r.clusters[id] = supercluster
-	r.lastAccessed[id] = time.Now()
-	r.clusterLock.Unlock()
-
-	// Get file info for response
-	fileInfo, err := os.Stat(savePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get file info: %v", err)
-	}
-
-	return &pb.CreateClusterResponse{
-		Cluster: &pb.ClusterInfo{
-			Id:        id,
-			NumPoints: req.NumPoints,
-			Timestamp: time.Now().Format(time.RFC3339),
-			FileSize:  fileInfo.Size(),
-		},
-	}, nil
-}
-
-func generateClusterFilename(numPoints int) string {
-	timestamp := time.Now().Format("20060102-150405")
-	id := uuid.New().String()[:8] // Use first 8 chars of UUID for brevity
-	return filepath.Join("data/clusters", fmt.Sprintf("cluster-%dp-%s-%s.zst", numPoints, timestamp, id))
-}
-
-func NewClusterRunner(maxClusters int) *ClusterRunner {
+func NewClusterRunner(maxClusters int, ch *cluster.CHClient) *ClusterRunner {
 	runner := &ClusterRunner{
 		clusters:     make(map[string]*cluster.Supercluster),
 		lastAccessed: make(map[string]time.Time),
 		maxClusters:  maxClusters,
+		ch:           ch,
 	}
 
 	// Start cleanup goroutine
@@ -126,10 +53,10 @@ func (r *ClusterRunner) cleanupInactiveClusters() {
 			}
 		}
 
-		// Remove inactive clusters
+		// Evict inactive clusters (skeleton released; CH remains canonical)
 		for _, id := range toRemove {
-			if cluster, exists := r.clusters[id]; exists {
-				cluster.CleanupCluster()
+			if sc, exists := r.clusters[id]; exists {
+				sc.CleanupCluster()
 				delete(r.clusters, id)
 				delete(r.lastAccessed, id)
 			}
@@ -139,40 +66,58 @@ func (r *ClusterRunner) cleanupInactiveClusters() {
 	}
 }
 
-func findClusterFile(id string) (string, error) {
-	files, err := os.ReadDir("data/clusters")
-	if err != nil {
-		return "", fmt.Errorf("failed to read clusters directory: %v", err)
+// loadClusterIfNeeded ensures the cluster skeleton is in memory, opening it
+// from CH if it was evicted or never loaded in this process. Returns the
+// *Supercluster so callers never need to re-look-up the pointer (avoiding
+// a TOCTOU race where an LRU eviction could occur between load and use).
+func (r *ClusterRunner) loadClusterIfNeeded(ctx context.Context, id string) (*cluster.Supercluster, error) {
+	// Fast path: already in memory.
+	r.clusterLock.Lock()
+	if sc, exists := r.clusters[id]; exists {
+		r.lastAccessed[id] = time.Now()
+		r.clusterLock.Unlock()
+		return sc, nil
+	}
+	r.clusterLock.Unlock()
+
+	// Slow path: build skeleton from CH outside the lock so we don't hold it
+	// during a potentially long network call.
+	sc := cluster.NewSupercluster(cluster.SuperclusterOptions{
+		MinZoom:   0,
+		MaxZoom:   16,
+		MinPoints: 2,
+		Radius:    40,
+		Extent:    512,
+		NodeSize:  64,
+	})
+	sc.SetCHClient(r.ch)
+	sc.SetClusterID(id)
+
+	if err := sc.Open(ctx); err != nil {
+		return nil, fmt.Errorf("open cluster %s from CH: %w", id, err)
 	}
 
-	for _, file := range files {
-		if strings.Contains(file.Name(), id) && strings.HasSuffix(file.Name(), ".zst") {
-			return filepath.Join("data/clusters", file.Name()), nil
-		}
-	}
-
-	return "", fmt.Errorf("no cluster file found with id %s", id)
-}
-
-func (r *ClusterRunner) loadClusterIfNeeded(id string) error {
+	// Re-acquire write lock to insert. Double-check in case a concurrent
+	// request already loaded the same cluster while we were in Open().
 	r.clusterLock.Lock()
 	defer r.clusterLock.Unlock()
 
-	// Update access time if cluster is already loaded
-	if _, exists := r.clusters[id]; exists {
+	if existing, exists := r.clusters[id]; exists {
+		// Another goroutine won the race; discard our copy and use theirs.
+		sc.CleanupCluster()
 		r.lastAccessed[id] = time.Now()
-		return nil
+		return existing, nil
 	}
 
-	// Check if we need to remove least recently used cluster
+	// Evict LRU entry if we're at capacity.
 	if len(r.clusters) >= r.maxClusters {
 		var oldestID string
 		var oldestTime time.Time
 		first := true
 
-		for id, accessTime := range r.lastAccessed {
+		for cid, accessTime := range r.lastAccessed {
 			if first || accessTime.Before(oldestTime) {
-				oldestID = id
+				oldestID = cid
 				oldestTime = accessTime
 				first = false
 			}
@@ -185,71 +130,125 @@ func (r *ClusterRunner) loadClusterIfNeeded(id string) error {
 		}
 	}
 
-	// Find the cluster file
-	clusterFile, err := findClusterFile(id)
-	if err != nil {
-		return fmt.Errorf("failed to find cluster file: %v", err)
-	}
-
-	// Load the requested cluster
-	supercluster, err := cluster.LoadCompressedSupercluster(clusterFile)
-	if err != nil {
-		return fmt.Errorf("failed to load cluster %s: %v", id, err)
-	}
-
-	r.clusters[id] = supercluster
+	r.clusters[id] = sc
 	r.lastAccessed[id] = time.Now()
-	return nil
+	return sc, nil
 }
 
-// Rest of the gRPC service implementations remain the same
-func (r *ClusterRunner) ListClusters(ctx context.Context, req *pb.ListClustersRequest) (*pb.ListClustersResponse, error) {
-	clusters, err := cluster.ListSavedClusters()
-	if err != nil {
-		return nil, err
+func (r *ClusterRunner) CreateCluster(ctx context.Context, req *pb.CreateClusterRequest) (*pb.CreateClusterResponse, error) {
+	fmt.Printf("Creating new cluster with %d points\n", req.NumPoints)
+
+	bounds := cluster.KDBounds{
+		MinX: -180.0,
+		MinY: -90.0,
+		MaxX: 180.0,
+		MaxY: 90.0,
 	}
 
-	pbClusters := make([]*pb.ClusterInfo, len(clusters))
-	for i, c := range clusters {
-		pbClusters[i] = &pb.ClusterInfo{
-			Id:        c.ID,
-			NumPoints: int32(c.NumPoints),
-			Timestamp: c.Timestamp.Format(time.RFC3339),
-			FileSize:  c.FileSize,
+	points := cluster.GenerateTestPoints(int(req.NumPoints), bounds)
+
+	options := cluster.SuperclusterOptions{
+		MinZoom:   0,
+		MaxZoom:   16,
+		MinPoints: 2,
+		// Must match the /40 scaling baked into migrations/002_rollup_template.sql
+		// — queryRollup uses Options.Radius to derive the tile range, and any
+		// other value will pick wrong tiles from the MV.
+		Radius:   40,
+		Extent:   512,
+		NodeSize: 64,
+		Log:      true,
+	}
+
+	id := uuid.New().String()[:8]
+
+	sc := cluster.NewSupercluster(options)
+	sc.SetCHClient(r.ch)
+	sc.SetClusterID(id)
+
+	if err := sc.Load(points); err != nil {
+		return nil, fmt.Errorf("failed to load points: %v", err)
+	}
+
+	// Release the 15M-point source slice + force the runtime to hand pages
+	// back to the OS. Without this RSS stays pinned at the Load high-water
+	// mark for the lifetime of the runner — Skeleton itself is tiny.
+	points = nil
+	runtime.GC()
+	debug.FreeOSMemory()
+
+	r.clusterLock.Lock()
+	r.clusters[id] = sc
+	r.lastAccessed[id] = time.Now()
+	r.clusterLock.Unlock()
+
+	return &pb.CreateClusterResponse{
+		Cluster: &pb.ClusterInfo{
+			Id:        id,
+			NumPoints: req.NumPoints,
+			Timestamp: time.Now().Format(time.RFC3339),
+			FileSize:  0,
+		},
+	}, nil
+}
+
+func (r *ClusterRunner) ListClusters(ctx context.Context, req *pb.ListClustersRequest) (*pb.ListClustersResponse, error) {
+	rows, err := r.ch.Conn().Query(ctx,
+		"SELECT cluster_id, count() AS n FROM clustopher.points GROUP BY cluster_id ORDER BY cluster_id")
+	if err != nil {
+		return nil, fmt.Errorf("list clusters: %w", err)
+	}
+	defer rows.Close()
+
+	var pbClusters []*pb.ClusterInfo
+	for rows.Next() {
+		var clusterID string
+		var n uint64
+		if err := rows.Scan(&clusterID, &n); err != nil {
+			return nil, fmt.Errorf("scan row: %w", err)
 		}
+		pbClusters = append(pbClusters, &pb.ClusterInfo{
+			Id:        clusterID,
+			NumPoints: int32(n),
+			Timestamp: "",
+			FileSize:  0,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return &pb.ListClustersResponse{Clusters: pbClusters}, nil
 }
 
 func (r *ClusterRunner) LoadCluster(ctx context.Context, req *pb.LoadClusterRequest) (*pb.LoadClusterResponse, error) {
-	if err := r.loadClusterIfNeeded(req.ClusterId); err != nil {
+	if _, err := r.loadClusterIfNeeded(ctx, req.ClusterId); err != nil {
 		return nil, err
 	}
 
-	info, err := cluster.GetClusterInfo(req.ClusterId)
-	if err != nil {
-		return nil, err
+	// Return basic info; NumPoints comes from CH.
+	row := r.ch.Conn().QueryRow(ctx,
+		"SELECT count() FROM clustopher.points WHERE cluster_id = ?", req.ClusterId)
+	var n uint64
+	if err := row.Scan(&n); err != nil {
+		return nil, fmt.Errorf("count points: %w", err)
 	}
 
 	return &pb.LoadClusterResponse{
 		Cluster: &pb.ClusterInfo{
-			Id:        info.ID,
-			NumPoints: int32(info.NumPoints),
-			Timestamp: info.Timestamp.Format(time.RFC3339),
-			FileSize:  info.FileSize,
+			Id:        req.ClusterId,
+			NumPoints: int32(n),
+			Timestamp: "",
+			FileSize:  0,
 		},
 	}, nil
 }
 
 func (r *ClusterRunner) GetClusters(ctx context.Context, req *pb.GetClustersRequest) (*pb.GetClustersResponse, error) {
-	if err := r.loadClusterIfNeeded(req.ClusterId); err != nil {
+	sc, err := r.loadClusterIfNeeded(ctx, req.ClusterId)
+	if err != nil {
 		return nil, err
 	}
-
-	r.clusterLock.RLock()
-	sc := r.clusters[req.ClusterId]
-	r.clusterLock.RUnlock()
 
 	bounds := cluster.KDBounds{
 		MinX: req.Bounds.MinX,
@@ -258,7 +257,10 @@ func (r *ClusterRunner) GetClusters(ctx context.Context, req *pb.GetClustersRequ
 		MaxY: req.Bounds.MaxY,
 	}
 
-	clusters := sc.GetClusters(bounds, int(req.Zoom))
+	clusters, err := sc.GetClustersCH(ctx, bounds, int(req.Zoom))
+	if err != nil {
+		return nil, fmt.Errorf("get clusters: %w", err)
+	}
 
 	features := make([]*pb.ClusterFeature, len(clusters))
 	for i, c := range clusters {
@@ -276,13 +278,10 @@ func (r *ClusterRunner) GetClusters(ctx context.Context, req *pb.GetClustersRequ
 }
 
 func (r *ClusterRunner) GetMetadata(ctx context.Context, req *pb.GetMetadataRequest) (*pb.GetMetadataResponse, error) {
-	if err := r.loadClusterIfNeeded(req.ClusterId); err != nil {
+	sc, err := r.loadClusterIfNeeded(ctx, req.ClusterId)
+	if err != nil {
 		return nil, err
 	}
-
-	r.clusterLock.RLock()
-	sc := r.clusters[req.ClusterId]
-	r.clusterLock.RUnlock()
 
 	bounds := cluster.KDBounds{
 		MinX: req.Bounds.MinX,
@@ -291,7 +290,10 @@ func (r *ClusterRunner) GetMetadata(ctx context.Context, req *pb.GetMetadataRequ
 		MaxY: req.Bounds.MaxY,
 	}
 
-	clusters := sc.GetClusters(bounds, int(req.Zoom))
+	clusters, err := sc.GetClustersCH(ctx, bounds, int(req.Zoom))
+	if err != nil {
+		return nil, fmt.Errorf("get clusters: %w", err)
+	}
 	summary := cluster.CalculateMetadataSummary(clusters)
 
 	// Convert metricsSummary
