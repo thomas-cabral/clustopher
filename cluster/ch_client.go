@@ -14,6 +14,7 @@ type CHConfig struct {
 
 type CHClient struct {
 	conn driver.Conn
+	dsn  string
 }
 
 func NewCHClient(ctx context.Context, cfg CHConfig) (*CHClient, error) {
@@ -29,9 +30,16 @@ func NewCHClient(ctx context.Context, cfg CHConfig) (*CHClient, error) {
 		conn.Close()
 		return nil, fmt.Errorf("ping clickhouse: %w", err)
 	}
-	return &CHClient{conn: conn}, nil
+	return &CHClient{conn: conn, dsn: cfg.DSN}, nil
 }
 
-func (c *CHClient) Conn() driver.Conn             { return c.conn }
+func (c *CHClient) Conn() driver.Conn              { return c.conn }
 func (c *CHClient) Ping(ctx context.Context) error { return c.conn.Ping(ctx) }
-func (c *CHClient) Close() error                 { return c.conn.Close() }
+func (c *CHClient) Close() error                   { return c.conn.Close() }
+
+func (c *CHClient) Clone(ctx context.Context) (*CHClient, error) {
+	if c.dsn == "" {
+		return nil, fmt.Errorf("clone clickhouse client: original DSN unavailable")
+	}
+	return NewCHClient(ctx, CHConfig{DSN: c.dsn})
+}

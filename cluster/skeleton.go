@@ -1,5 +1,12 @@
 package cluster
 
+import (
+	"runtime"
+	"sync"
+)
+
+const parallelSortThreshold = 1_000_000
+
 // SkeletonLeaf is a tree leaf that retains only a bounding box, contiguous
 // internal-id range, and point count. The actual point data lives in
 // ClickHouse (or, during Phase 1, in the existing in-memory point store).
@@ -144,6 +151,71 @@ func SortPointsIntoLeafOrder(points []KDPoint, nodeSize int) []KDPoint {
 	out := make([]KDPoint, len(points))
 	copy(out, points)
 	sortRecursive(out, 0, len(out)-1, 0, nodeSize)
+	return out
+}
+
+func SortPointsIntoLeafOrderParallel(points []KDPoint, nodeSize int) []KDPoint {
+	return sortPointsIntoLeafOrderParallel(points, nodeSize, parallelSortThreshold)
+}
+
+func sortPointsIntoLeafOrderParallel(points []KDPoint, nodeSize, threshold int) []KDPoint {
+	if nodeSize < 1 {
+		nodeSize = 1
+	}
+	if threshold < 1 {
+		threshold = 1
+	}
+	out := make([]KDPoint, len(points))
+	copy(out, points)
+	if len(out) == 0 {
+		return out
+	}
+
+	workers := runtime.GOMAXPROCS(0)
+	if workers <= 1 || len(out) < threshold {
+		sortRecursive(out, 0, len(out)-1, 0, nodeSize)
+		return out
+	}
+
+	tokens := make(chan struct{}, workers-1)
+	var wg sync.WaitGroup
+	var sortParallel func(lo, hi, axis int)
+
+	run := func(lo, hi, axis int) {
+		if hi-lo+1 < threshold {
+			sortParallel(lo, hi, axis)
+			return
+		}
+		select {
+		case tokens <- struct{}{}:
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() { <-tokens }()
+				sortParallel(lo, hi, axis)
+			}()
+		default:
+			sortParallel(lo, hi, axis)
+		}
+	}
+
+	sortParallel = func(lo, hi, axis int) {
+		if hi-lo+1 <= nodeSize {
+			return
+		}
+		mid := (lo + hi) / 2
+		if axis == 0 {
+			quickselectX(out, lo, hi, mid)
+		} else {
+			quickselectY(out, lo, hi, mid)
+		}
+		nextAxis := axis ^ 1
+		run(lo, mid-1, nextAxis)
+		run(mid+1, hi, nextAxis)
+	}
+
+	sortParallel(0, len(out)-1, 0)
+	wg.Wait()
 	return out
 }
 

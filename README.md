@@ -2,7 +2,11 @@
 
 [![Go Tests](https://github.com/thomas-cabral/clustopher/actions/workflows/go-test.yml/badge.svg)](https://github.com/thomas-cabral/clustopher/actions/workflows/go-test.yml)
 
-Clustopher is a high-performance spatial clustering system designed to handle large-scale point datasets (30M+ points) with associated metrics and metadata. It implements a KD-tree based clustering approach similar to Mapbox's Supercluster, with ClickHouse as the canonical data store for points and per-zoom aggregations.
+Clustopher is a spatial point-clustering engine for datasets in the tens of millions of points, built to stay interactive (sub-100ms `GetClusters`) at every zoom level on a single box.
+
+It splits the problem in two. ClickHouse is the canonical store: raw points live in a `MergeTree` partitioned by cluster, and a stack of materialized views maintains a per-zoom rollup table for zooms 2–16. In Go, a bounds-only "skeleton" KD-tree (`{Bounds, IDMin, IDMax, Count}` per leaf — 28 bytes) sits in memory as a spatial index over those points, ~6.5 MB resident for 15M points. At query time the zoom level decides the path: low/mid zoom runs a single SQL aggregation against the rollup table; high zoom walks the skeleton, classifies leaves as fully-inside vs straddling the cluster radius, batches `id BETWEEN` fetches into ClickHouse for the partial leaves, and runs the Supercluster-style radius clustering only on that small leftover set.
+
+The motivation was a pure in-memory predecessor (KD-tree + grid clustering + zstd snapshots) that held every point and its metadata in Go heap. At 15M points it pinned ~9 GB of heap, took 30+ seconds to answer a low-zoom continental query, and couldn't be reloaded without deserializing a multi-GB snapshot. Pushing the points into ClickHouse and keeping only leaf bounds in Go collapses both the memory footprint and the cold-load story while letting low-zoom queries become a single rollup-table scan instead of a tree traversal.
 
 ## Key Features
 

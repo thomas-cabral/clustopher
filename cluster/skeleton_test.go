@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"runtime"
 	"testing"
 	"unsafe"
 )
@@ -69,6 +70,28 @@ func TestSortPointsIntoLeafOrder_DeterministicLeaves(t *testing.T) {
 		area := (leafBounds.MaxX - leafBounds.MinX) * (leafBounds.MaxY - leafBounds.MinY)
 		if area > 0.5*fullArea {
 			t.Errorf("leaf %d covers >50%% of full bbox (area=%f, full=%f)", i/2, area, fullArea)
+		}
+	}
+}
+
+func TestSortPointsIntoLeafOrderParallel_MatchesSequential(t *testing.T) {
+	prev := runtime.GOMAXPROCS(4)
+	defer runtime.GOMAXPROCS(prev)
+
+	pts := make([]KDPoint, 4096)
+	for i := range pts {
+		pts[i] = KDPoint{
+			ID: uint32(i + 1),
+			X:  float32((i*7919)%10007) / 10007,
+			Y:  float32((i*1543)%10009) / 10009,
+		}
+	}
+
+	want := SortPointsIntoLeafOrder(pts, 16)
+	got := sortPointsIntoLeafOrderParallel(pts, 16, 64)
+	for i := range want {
+		if got[i].ID != want[i].ID {
+			t.Fatalf("point %d id = %d, want %d", i, got[i].ID, want[i].ID)
 		}
 	}
 }
