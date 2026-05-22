@@ -97,7 +97,7 @@ func TestScalePerf(t *testing.T) {
 		cleanup := func() {
 			_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.staging_points DROP PARTITION ?", clusterID)
 			_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.points DROP PARTITION ?", clusterID)
-			for z := 2; z <= 16; z++ {
+			for z := MinRollupZoom; z <= MaxRollupZoom; z++ {
 				_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.rollup_z"+strconv.Itoa(z)+" DROP PARTITION ?", clusterID)
 			}
 		}
@@ -161,7 +161,7 @@ func TestScalePerf(t *testing.T) {
 		_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.staging_points DROP PARTITION ?", clusterID)
 
 		optStart := time.Now()
-		for z := 2; z <= 16; z++ {
+		for z := MinRollupZoom; z <= MaxRollupZoom; z++ {
 			_ = c.Conn().Exec(ctx, "OPTIMIZE TABLE clustopher.rollup_z"+strconv.Itoa(z)+" PARTITION ? FINAL", clusterID)
 		}
 		res.optimizeSec = time.Since(optStart).Seconds()

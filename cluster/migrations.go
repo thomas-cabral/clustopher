@@ -59,8 +59,8 @@ func RunMigrations(ctx context.Context, conn driver.Conn, dir string) error {
 
 func expandPerZoom(template string) []string {
 	radius := fmt.Sprintf("%d", DefaultRollupRadius)
-	out := make([]string, 0, 15)
-	for z := 2; z <= 16; z++ {
+	out := make([]string, 0, MaxRollupZoom-MinRollupZoom+1)
+	for z := MinRollupZoom; z <= MaxRollupZoom; z++ {
 		s := strings.ReplaceAll(template, "{N}", fmt.Sprintf("%d", z))
 		s = strings.ReplaceAll(s, "{RADIUS}", radius)
 		out = append(out, s)

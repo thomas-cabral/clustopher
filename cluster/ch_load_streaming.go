@@ -255,4 +255,3 @@ func (sc *Supercluster) streamingIDMapWorker(ctx context.Context, ch *CHClient, 
 		}
 	}
 }
-

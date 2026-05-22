@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -174,18 +175,92 @@ func (sc *Supercluster) queryTree(ctx context.Context, viewport KDBounds, zoom i
 	}
 
 	if len(partial) > 0 {
-		pts, err := sc.fetchLeafPoints(ctx, partial, zoom)
+		pts, attrs, err := sc.fetchLeafPoints(ctx, partial, zoom)
 		if err != nil {
 			return nil, err
 		}
 		if len(pts) > 0 {
 			clusters := sc.clusterPoints(pts, float32(sc.Options.Radius))
+			attachAttrsFromMembers(clusters, attrs)
 			sc.unprojectClusters(clusters, zoom)
 			out = append(out, clusters...)
 		}
 	}
 
 	return out, nil
+}
+
+// pointAttrs carries per-point metrics + metadata fetched from CH alongside
+// the geometry. Used by the partial-leaf path so the in-Go clusterPoints stage
+// can attach aggregated metric/metadata back onto each emitted ClusterNode.
+type pointAttrs struct {
+	Metrics  map[string]float32
+	Metadata map[string]string
+}
+
+// attachAttrsFromMembers fills each cluster's Metrics/Metadata by aggregating
+// the per-member attributes recorded in attrs. Metrics are averaged so the
+// per-cluster value matches the convention used by the rollup and
+// aggregateLeaves paths (sum/cnt); metadata picks the most common value per
+// key across members. Clusters whose Children list is empty (defensive — all
+// clusters built by clusterPoints carry their member IDs) are left untouched.
+func attachAttrsFromMembers(clusters []ClusterNode, attrs map[uint32]pointAttrs) {
+	if len(attrs) == 0 {
+		return
+	}
+	for i := range clusters {
+		members := clusters[i].Children
+		if len(members) == 0 {
+			continue
+		}
+		sums := make(map[string]float64)
+		counts := make(map[string]uint64)
+		metaFreq := make(map[string]map[string]int)
+		for _, id := range members {
+			a, ok := attrs[id]
+			if !ok {
+				continue
+			}
+			for k, v := range a.Metrics {
+				sums[k] += float64(v)
+				counts[k]++
+			}
+			for k, v := range a.Metadata {
+				inner, ok := metaFreq[k]
+				if !ok {
+					inner = make(map[string]int)
+					metaFreq[k] = inner
+				}
+				inner[v]++
+			}
+		}
+		if len(sums) > 0 {
+			metrics := make(map[string]float32, len(sums))
+			for k, s := range sums {
+				if n := counts[k]; n > 0 {
+					metrics[k] = float32(s / float64(n))
+				}
+			}
+			clusters[i].Metrics = metrics
+		}
+		if len(metaFreq) > 0 {
+			meta := make(map[string]json.RawMessage, len(metaFreq))
+			for k, freq := range metaFreq {
+				var topVal string
+				var topCnt int
+				for v, c := range freq {
+					if c > topCnt {
+						topVal = v
+						topCnt = c
+					}
+				}
+				if b, err := json.Marshal(topVal); err == nil {
+					meta[k] = b
+				}
+			}
+			clusters[i].Metadata = meta
+		}
+	}
 }
 
 // aggregateLeaves emits one ClusterNode per inside leaf by aggregating across
@@ -278,17 +353,18 @@ func (sc *Supercluster) aggregateLeaves(ctx context.Context, leaves []int32) (cl
 // them projected to the target zoom (so existing clusterPoints can run).
 // Leaves are compressed into contiguous internal-id ranges to avoid serializing
 // large leaf arrays into ClickHouse query text.
-func (sc *Supercluster) fetchLeafPoints(ctx context.Context, leaves []int32, zoom int) ([]KDPoint, error) {
+func (sc *Supercluster) fetchLeafPoints(ctx context.Context, leaves []int32, zoom int) ([]KDPoint, map[uint32]pointAttrs, error) {
 	if len(leaves) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	ranges := sc.leafIDRanges(leaves)
 	if len(ranges) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	out := make([]KDPoint, 0, len(leaves)*sc.Options.NodeSize)
+	attrs := make(map[uint32]pointAttrs, len(leaves)*sc.Options.NodeSize)
 	for start := 0; start < len(ranges); start += maxLeafIDRangesPerQuery {
 		end := start + maxLeafIDRangesPerQuery
 		if end > len(ranges) {
@@ -296,7 +372,7 @@ func (sc *Supercluster) fetchLeafPoints(ctx context.Context, leaves []int32, zoo
 		}
 		where, rangeArgs := leafRangePredicate(ranges[start:end])
 		q := fmt.Sprintf(`
-        SELECT id, x, y FROM clustopher.points
+        SELECT id, x, y, metrics, metadata FROM clustopher.points
         WHERE cluster_id = ?
           AND (%s)
     `, where)
@@ -307,25 +383,32 @@ func (sc *Supercluster) fetchLeafPoints(ctx context.Context, leaves []int32, zoo
 
 		rows, err := sc.ch.Conn().Query(ctx, q, args...)
 		if err != nil {
-			return nil, fmt.Errorf("fetch leaf points: %w", err)
+			return nil, nil, fmt.Errorf("fetch leaf points: %w", err)
 		}
-		var id uint32
-		var x, y float32
+		var (
+			id       uint32
+			x, y     float32
+			metrics  map[string]float32
+			metadata map[string]string
+		)
 		for rows.Next() {
-			if err := rows.Scan(&id, &x, &y); err != nil {
+			if err := rows.Scan(&id, &x, &y, &metrics, &metadata); err != nil {
 				rows.Close()
-				return nil, err
+				return nil, nil, err
 			}
 			proj := sc.projectFast(x, y, zoom)
 			out = append(out, KDPoint{ID: id, X: proj[0], Y: proj[1], NumPoints: 1})
+			if len(metrics) > 0 || len(metadata) > 0 {
+				attrs[id] = pointAttrs{Metrics: metrics, Metadata: metadata}
+			}
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, nil, err
 		}
 		rows.Close()
 	}
-	return out, nil
+	return out, attrs, nil
 }
 
 func (sc *Supercluster) leafIDRanges(leaves []int32) []leafIDRange {

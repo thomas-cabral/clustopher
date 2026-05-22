@@ -151,7 +151,7 @@ func (sc *Supercluster) resetCanonicalCluster(ctx context.Context) error {
 	if err := sc.ch.Conn().Exec(ctx, "ALTER TABLE clustopher.points DROP PARTITION ?", sc.clusterID); err != nil {
 		return fmt.Errorf("drop points partition: %w", err)
 	}
-	for z := 2; z <= 16; z++ {
+	for z := MinRollupZoom; z <= MaxRollupZoom; z++ {
 		if err := sc.ch.Conn().Exec(ctx, "ALTER TABLE clustopher.rollup_z"+strconv.Itoa(z)+" DROP PARTITION ?", sc.clusterID); err != nil {
 			return fmt.Errorf("drop rollup_z%d partition: %w", z, err)
 		}

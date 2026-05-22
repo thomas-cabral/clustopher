@@ -142,9 +142,11 @@ Two load paths are exercised:
 | 200 M  | KD     |  26.2 s |  536.2 s |  444.2 s |  334 MB | 3.1 M |
 | 300 M  | KD     |  45.3 s |  833.7 s |  569.0 s |  444 MB | 4.7 M |
 | 500 M  | Morton |  65.4 s | 1 328.0 s |  744.4 s |  810 MB | 7.8 M |
-| **1 B** | **Morton** | **135.3 s** | **4 390.8 s** | **1 596.3 s** | **1 577 MB** | **15.6 M** |
+| **1 B** | **Morton** | **178.5 s** | **2 747.3 s** | **7.4 s** | **1 580 MB** | **15.6 M** |
 
 Resident heap is what the skeleton tree pins after `Load…` returns + GC. Raw points live in ClickHouse; Go holds only the bounds-only leaf index. Rollup `OPTIMIZE FINAL` collapses per-insert parts into a single sorted run per zoom partition — needed once after bulk load so the rollup path scans contiguous data.
+
+Rollup MVs are only created for zooms `[MinRollupZoom..MaxRollupZoom]` (currently 2–10), because the routing cutoff `ZSplit=11` means zooms 11+ are answered by the in-memory skeleton tree, never by the rollup path. Dropping the z11–z16 MVs at 1 B points cuts Load wall-clock 46% (less write-amplification on insert) and `OPTIMIZE FINAL` 99.7% (z11–z16 would have held ~1 B rollup rows because their tile grids approach point count at high zoom).
 
 #### Query latency (`GetClustersCH`, 5-iter warm avg)
 
@@ -157,7 +159,7 @@ Resident heap is what the skeleton tree pins after `Load…` returns + GC. Raw p
 | 200 M  |  **3.5 ms** | **14.9 ms** |  **69.1 ms** |  34 408 | 15.07 MB |
 | 300 M  |  **3.7 ms** | **16.5 ms** | **136.8 ms** |  44 683 | 20.46 MB |
 | 500 M  |  **3.4 ms** | **10.7 ms** | **270.9 ms** |  59 064 | 28.45 MB |
-| **1 B** |  **3.9 ms** | **13.1 ms** | **602.0 ms** |  68 984 | 43.25 MB |
+| **1 B** |  **4.3 ms** | **14.2 ms** | **1 000.3 ms** |  68 986 | 262.08 MB |
 
 z2 and z8 (`zoom < ZSplit`, default 11) hit the per-zoom rollup materialized views in ClickHouse: latency is flat across the entire 200× size range because the rollup-row count is bounded by the zoom-tile grid, not the underlying point count.
 
