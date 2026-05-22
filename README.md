@@ -126,39 +126,36 @@ CLICKHOUSE_DSN=clickhouse://default:@localhost:9000/clustopher_test go test ./..
 
 Measured on AMD Ryzen 9 5900X (24 threads), single-node ClickHouse 24.8 in Docker, random points uniformly distributed across the CONUS bounding box. Viewports are zoom-appropriate (continental at low zoom, state at mid zoom, city at high zoom):
 
-Two load paths are exercised:
-
-- **`LoadFromCHStaging`** (default for ≤300 M): materializes the full `[]KDPoint` slice in Go and runs an exact KD-tree median-partition sort. Tight leaf bounds, best high-zoom query latency, but Go heap grows linearly with point count.
-- **`LoadFromCHStreaming`** (used for 500 M and 1 B rows here): pushes the spatial sort into ClickHouse via a Morton-encoded `ORDER BY`, streams the sorted rows back in `NodeSize` chunks, and builds skeleton leaves on the fly. Go heap is bounded (≈ 1.6 GB at 1 B points). Morton leaves are slightly looser than KD leaves, so high-zoom queries return a few % more raw points at viewport edges.
+All sizes are measured against `LoadFromCHStreaming`, which pushes the spatial sort into ClickHouse via a Morton-encoded `ORDER BY`, streams the sorted rows back in `NodeSize` chunks, and builds skeleton leaves on the fly. Go heap is bounded by the skeleton tree alone (≈ 1.6 GB at 1 B points). An alternative `LoadFromCHStaging` path runs an exact KD-tree median-partition sort in Go — slightly tighter leaf bounds and better high-zoom latency, but heap grows linearly so it tops out around 300 M on this box.
 
 #### Scale (load + storage)
 
-| Points | Path | CH stage gen | Load (skeleton + canonical points) | Rollup OPTIMIZE FINAL | Resident heap after load | Skeleton leaves |
-|--------|------|-------------:|-----------------------------------:|----------------------:|-------------------------:|----------------:|
-|   5 M  | KD     |   0.7 s |    9.2 s |   17.1 s |   18 MB |  78 K |
-|  15 M  | KD     |   1.8 s |   28.6 s |   43.8 s |   33 MB | 234 K |
-|  50 M  | KD     |   6.3 s |  103.1 s |  117.6 s |   83 MB | 781 K |
-| 100 M  | KD     |  12.2 s |  216.4 s |  212.5 s |  176 MB | 1.5 M |
-| 200 M  | KD     |  26.2 s |  536.2 s |  444.2 s |  334 MB | 3.1 M |
-| 300 M  | KD     |  45.3 s |  833.7 s |  569.0 s |  444 MB | 4.7 M |
-| 500 M  | Morton |  65.4 s | 1 328.0 s |  744.4 s |  810 MB | 7.8 M |
-| **1 B** | **Morton** | **178.5 s** | **2 747.3 s** | **7.4 s** | **1 580 MB** | **15.6 M** |
+| Points | CH stage gen | Load (skeleton + canonical points) | Rollup OPTIMIZE FINAL | Resident heap after load | Skeleton leaves |
+|--------|-------------:|-----------------------------------:|----------------------:|-------------------------:|----------------:|
+|   5 M  |   1.0 s |    13.5 s |   4.3 s |   10 MB |  78 K |
+|  15 M  |   2.1 s |    38.6 s |   4.7 s |   28 MB | 234 K |
+|  50 M  |   6.4 s |   131.4 s |   5.6 s |   74 MB | 781 K |
+| 100 M  |  12.8 s |   255.7 s |   5.8 s |  174 MB | 1.5 M |
+| 200 M  |  26.4 s |   538.4 s |   8.1 s |  336 MB | 3.1 M |
+| 300 M  |  40.8 s |   799.0 s |   7.6 s |  418 MB | 4.7 M |
+| 500 M  |  69.4 s | 1 320.1 s |   6.2 s |  812 MB | 7.8 M |
+| **1 B** | **178.5 s** | **2 747.3 s** | **7.4 s** | **1 580 MB** | **15.6 M** |
 
 Resident heap is what the skeleton tree pins after `Load…` returns + GC. Raw points live in ClickHouse; Go holds only the bounds-only leaf index. Rollup `OPTIMIZE FINAL` collapses per-insert parts into a single sorted run per zoom partition — needed once after bulk load so the rollup path scans contiguous data.
 
-Rollup MVs are only created for zooms `[MinRollupZoom..MaxRollupZoom]` (currently 2–10), because the routing cutoff `ZSplit=11` means zooms 11+ are answered by the in-memory skeleton tree, never by the rollup path. Dropping the z11–z16 MVs at 1 B points cuts Load wall-clock 46% (less write-amplification on insert) and `OPTIMIZE FINAL` 99.7% (z11–z16 would have held ~1 B rollup rows because their tile grids approach point count at high zoom).
+Rollup MVs are only created for zooms `[MinRollupZoom..MaxRollupZoom]` (currently 2–10), because the routing cutoff `ZSplit=11` means zooms 11+ are answered by the in-memory skeleton tree, never by the rollup path. Dropping the z11–z16 MVs cuts both incremental Load wall-clock (fewer MVs to fan to per insert block) and `OPTIMIZE FINAL` from minutes to single-digit seconds at every dataset size measured.
 
 #### Query latency (`GetClustersCH`, 5-iter warm avg)
 
 | Points | z2 / CONUS 60°×24° | z8 / state 5°×5° | z14 / city 0.5°×0.5° | z14 clusters returned | z14 alloc/op |
 |--------|-------------------:|-----------------:|---------------------:|----------------------:|-------------:|
-|   5 M  |  **2.9 ms** | **10.5 ms** |   **3.3 ms** |   1 600 |  0.48 MB |
-|  15 M  |  **5.5 ms** | **12.9 ms** |   **6.6 ms** |   3 772 |  1.33 MB |
-|  50 M  |  **3.7 ms** | **10.4 ms** |  **13.3 ms** |  11 395 |  4.20 MB |
-| 100 M  |  **3.6 ms** | **10.2 ms** |  **29.0 ms** |  20 795 |  8.80 MB |
-| 200 M  |  **3.5 ms** | **14.9 ms** |  **69.1 ms** |  34 408 | 15.07 MB |
-| 300 M  |  **3.7 ms** | **16.5 ms** | **136.8 ms** |  44 683 | 20.46 MB |
-| 500 M  |  **3.4 ms** | **10.7 ms** | **270.9 ms** |  59 064 | 28.45 MB |
+|   5 M  |  **3.7 ms** | **11.8 ms** |   **13.4 ms** |   2 112 |   4.39 MB |
+|  15 M  |  **3.5 ms** | **11.1 ms** |   **19.8 ms** |   4 792 |  10.09 MB |
+|  50 M  |  **4.9 ms** | **15.1 ms** |   **46.2 ms** |  12 529 |  26.87 MB |
+| 100 M  |  **4.7 ms** | **11.8 ms** |   **75.4 ms** |  21 539 |  47.00 MB |
+| 200 M  |  **4.2 ms** | **12.1 ms** |  **155.2 ms** |  36 636 |  83.62 MB |
+| 300 M  |  **4.0 ms** | **13.0 ms** |  **269.2 ms** |  47 373 | 115.90 MB |
+| 500 M  |  **5.3 ms** | **13.0 ms** |  **508.8 ms** |  59 064 | 163.22 MB |
 | **1 B** |  **4.3 ms** | **14.2 ms** | **1 000.3 ms** |  68 986 | 262.08 MB |
 
 z2 and z8 (`zoom < ZSplit`, default 11) hit the per-zoom rollup materialized views in ClickHouse: latency is flat across the entire 200× size range because the rollup-row count is bounded by the zoom-tile grid, not the underlying point count.
@@ -177,13 +174,13 @@ Tradeoff: Morton leaves are slightly looser than KD leaves (about 15 % more poin
 
 | Zoom | Old (full bbox, in-memory KD-tree) | New (zoom-appropriate viewport, CH-backed) | Speedup |
 |------|-----------------------------------:|-------------------------------------------:|--------:|
-| 2    | 30.35 s | 5.5 ms |  ~5 500× |
-| 8    | 18.19 s | 12.9 ms |  ~1 400× |
-| 14   | 67.42 s | 6.6 ms | ~10 200× |
+| 2    | 30.35 s | 3.5 ms |  ~8 700× |
+| 8    | 18.19 s | 11.1 ms |  ~1 600× |
+| 14   | 67.42 s | 19.8 ms | ~3 400× |
 
 Columns are not strictly apples-to-apples — the old benchmarks always queried the full CONUS bbox, unrealistic at z14 where a real viewport is one neighborhood. With zoom-appropriate viewports the new system stays interactive across the entire zoom range, and now scales to ~67× the point count of the old in-memory system (1 B vs ~15 M before the heap blew up).
 
-Raw results: `benchmark_results/scale_full_rerun.txt`, `benchmark_results/scale_streaming_500M.txt`, `benchmark_results/scale_streaming_1B.txt`, `benchmark_results/baseline_15M.txt`.
+Raw results: `benchmark_results/scale_streaming_full_v3.txt`, `benchmark_results/scale_streaming_1B_v3.txt`, `benchmark_results/baseline_15M.txt`.
 
 ### Limitations
 - Single-node ClickHouse only; no distributed CH support
