@@ -50,7 +50,7 @@ func TestRunMigrations_CreatesTables(t *testing.T) {
 		}
 	}
 
-	for z := 2; z <= 16; z++ {
+	for z := MinRollupZoom; z <= MaxRollupZoom; z++ {
 		var c uint64
 		q := "SELECT count() FROM system.tables WHERE database='clustopher' AND name=?"
 		row := conn.QueryRow(context.Background(), q, "rollup_z"+strconv.Itoa(z))
@@ -62,7 +62,7 @@ func TestRunMigrations_CreatesTables(t *testing.T) {
 		}
 	}
 
-	for z := 2; z <= 16; z++ {
+	for z := MinRollupZoom; z <= MaxRollupZoom; z++ {
 		var c uint64
 		q := "SELECT count() FROM system.tables WHERE database='clustopher' AND name=?"
 		if err := conn.QueryRow(context.Background(), q, "mv_rollup_z"+strconv.Itoa(z)).Scan(&c); err != nil {

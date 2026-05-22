@@ -112,7 +112,7 @@ func TestMetricRollupAllZooms(t *testing.T) {
 	cleanup := func() {
 		_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.staging_points DROP PARTITION ?", clusterID)
 		_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.points DROP PARTITION ?", clusterID)
-		for z := 2; z <= 16; z++ {
+		for z := MinRollupZoom; z <= MaxRollupZoom; z++ {
 			_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.rollup_z"+strconv.Itoa(z)+" DROP PARTITION ?", clusterID)
 		}
 	}
@@ -153,8 +153,10 @@ func TestMetricRollupAllZooms(t *testing.T) {
 	}
 	t.Logf("loaded n=%d in %.2fs leaves=%d", n, time.Since(start).Seconds(), len(sc.Skeleton.Leaves))
 
-	// Force rollup MV merges so per-tile rows are fully merged.
-	for z := 2; z <= 16; z++ {
+	// Force rollup MV merges so per-tile rows are fully merged. Only zooms
+	// [MinRollupZoom..MaxRollupZoom] have MV tables; higher zooms answer via
+	// the skeleton path and have no rollup to verify directly.
+	for z := MinRollupZoom; z <= MaxRollupZoom; z++ {
 		_ = c.Conn().Exec(ctx, "OPTIMIZE TABLE clustopher.rollup_z"+strconv.Itoa(z)+" PARTITION ? FINAL", clusterID)
 	}
 
@@ -166,8 +168,9 @@ func TestMetricRollupAllZooms(t *testing.T) {
 	}
 
 	// 2) Direct rollup-table probe: catches SummingMergeTree map-merge bug
-	// independent of the Go query path.
-	for z := 2; z <= 16; z++ {
+	// independent of the Go query path. Limited to the zooms that actually
+	// have rollup MV tables; high zooms (>= ZSplit) are validated via path 3.
+	for z := MinRollupZoom; z <= MaxRollupZoom; z++ {
 		label := fmt.Sprintf("rollup_z%02d", z)
 		q := fmt.Sprintf(
 			"SELECT sum(cnt), sumMap(metric_sums) FROM clustopher.rollup_z%d WHERE cluster_id = ?", z)
