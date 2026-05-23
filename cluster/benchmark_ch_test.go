@@ -347,8 +347,12 @@ func generateDenseStagingPoints(ctx context.Context, c *CHClient, clusterID stri
 	// NB: previously used `randCanonical()` for x and y in the same SELECT; the
 	// CH planner folded the two calls into a single value, so every generated
 	// point landed on the diagonal `y = MinY + (x-MinX) * (MaxY-MinY)/(MaxX-MinX)`.
-	// Use cityHash64(number, salt) with distinct salts per axis so x, y, and the
-	// metric draw are independent uniform variates.
+	// Use cityHash64(number, salt) with distinct salts per axis so each draw is
+	// an independent uniform variate.
+	//
+	// Metrics: price ($0–$500), rating (1.0–5.0), visitors (0–10k).
+	// Metadata: category (5 buckets), borough (5 buckets), verified (yes/no
+	// ~70/30), tier (gold/silver/bronze ~10/30/60).
 	return c.Conn().Exec(ctx, `
         INSERT INTO clustopher.staging_points (cluster_id, external_id, x, y, metrics, metadata)
         SELECT
@@ -356,8 +360,21 @@ func generateDenseStagingPoints(ctx context.Context, c *CHClient, clusterID stri
             toUInt32(number + 1) AS external_id,
             toFloat32(? + (cityHash64(number, 1) / 18446744073709551615.0) * (? - ?)) AS x,
             toFloat32(? + (cityHash64(number, 2) / 18446744073709551615.0) * (? - ?)) AS y,
-            map('value', toFloat32((cityHash64(number, 3) / 18446744073709551615.0) * 100)) AS metrics,
-            map('type', 'test') AS metadata
+            map(
+                'price',    toFloat32((cityHash64(number, 3) / 18446744073709551615.0) * 500.0),
+                'rating',   toFloat32(1.0 + (cityHash64(number, 7) / 18446744073709551615.0) * 4.0),
+                'visitors', toFloat32(floor((cityHash64(number, 8) / 18446744073709551615.0) * 10000))
+            ) AS metrics,
+            map(
+                'category', ['retail','grocery','restaurant','gas','pharmacy'][1 + toInt32(cityHash64(number, 4) % 5)],
+                'borough',  ['manhattan','brooklyn','queens','bronx','staten'][1 + toInt32(cityHash64(number, 5) % 5)],
+                'verified', if(cityHash64(number, 6) % 100 < 70, 'yes', 'no'),
+                'tier',     multiIf(
+                                cityHash64(number, 9) % 100 < 10, 'gold',
+                                cityHash64(number, 9) % 100 < 40, 'silver',
+                                'bronze'
+                            )
+            ) AS metadata
         FROM numbers(?)
     `, clusterID, bounds.MinX, bounds.MaxX, bounds.MinX, bounds.MinY, bounds.MaxY, bounds.MinY, uint64(n))
 }

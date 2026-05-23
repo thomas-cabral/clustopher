@@ -227,7 +227,7 @@
                                 </button>
                             </div>
                             <div class="cluster-details">
-                                <span class="timestamp">{new Date(cluster.timestamp).toLocaleString()}</span>
+                                <span class="cluster-id" title="Cluster ID">{cluster.id}</span>
                                 <span class="size">{(cluster.fileSize / (1024 * 1024)).toFixed(1)} MB</span>
                             </div>
                         </div>

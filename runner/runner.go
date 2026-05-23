@@ -296,6 +296,28 @@ func (r *ClusterRunner) GetMetadata(ctx context.Context, req *pb.GetMetadataRequ
 	}
 	summary := cluster.CalculateMetadataSummary(clusters)
 
+	// summary.TotalPoints from CalculateMetadataSummary only counts what's
+	// visible in the current viewport. The UI sidebar wants the cluster's
+	// true total, so override with a direct SELECT count() against the
+	// canonical points table.
+	var totalPoints uint64
+	if err := r.ch.Conn().QueryRow(ctx,
+		"SELECT count() FROM clustopher.points WHERE cluster_id = ?",
+		req.ClusterId).Scan(&totalPoints); err != nil {
+		return nil, fmt.Errorf("count cluster points: %w", err)
+	}
+
+	// Backfill metadata distribution from CH. The rollup-MV path used at low
+	// zoom doesn't carry per-point metadata, so cluster nodes returned by
+	// GetClustersCH have empty Metadata maps when zoom < ZSplit. Probe the
+	// canonical points table directly within the viewport so the UI sidebar
+	// always shows metadata totals regardless of zoom.
+	metadataDist, err := r.queryMetadataDistribution(ctx, req.ClusterId, bounds)
+	if err != nil {
+		// Non-fatal — fall back to whatever CalculateMetadataSummary produced.
+		fmt.Printf("metadata distribution probe failed: %v\n", err)
+	}
+
 	// Convert metricsSummary
 	metricsSummary := make(map[string]*pb.MetricStats)
 	for metric, stats := range summary.MetricsSummary {
@@ -334,11 +356,66 @@ func (r *ClusterRunner) GetMetadata(ctx context.Context, req *pb.GetMetadataRequ
 		}
 	}
 
+	// Overlay CH-side metadata distribution on top of any in-memory summary.
+	// The CH probe is authoritative because it scans every point in the
+	// viewport (no rollup MV truncation, no skeleton path attribution gaps).
+	for key, valueCounts := range metadataDist {
+		metadataSummary[key] = &pb.MetadataValue{
+			Distribution: &pb.Distribution{Values: valueCounts},
+		}
+	}
+
 	return &pb.GetMetadataResponse{
-		TotalPoints:     int32(summary.TotalPoints),
+		TotalPoints:     int32(totalPoints),
 		NumClusters:     int32(summary.NumClusters),
 		NumSinglePoints: int32(summary.NumSinglePoints),
 		MetricsSummary:  metricsSummary,
 		MetadataSummary: metadataSummary,
 	}, nil
+}
+
+// queryMetadataDistribution returns a per-key map of metadata-value counts
+// across all points inside the viewport for the given cluster. It unrolls the
+// Map(String, String) metadata column via arrayJoin so categorical fields
+// (e.g. {"type":"test"}) end up as {"type": {"test": N}} in the response.
+func (r *ClusterRunner) queryMetadataDistribution(ctx context.Context, clusterID string, bounds cluster.KDBounds) (map[string]map[string]float64, error) {
+	rows, err := r.ch.Conn().Query(ctx, `
+        SELECT kv.1 AS k, kv.2 AS v, count() AS cnt
+        FROM (
+            SELECT arrayJoin(
+                arrayMap((mk, mv) -> (mk, mv), mapKeys(metadata), mapValues(metadata))
+            ) AS kv
+            FROM clustopher.points
+            WHERE cluster_id = ?
+              AND x BETWEEN ? AND ?
+              AND y BETWEEN ? AND ?
+        )
+        GROUP BY k, v
+        ORDER BY k, cnt DESC
+    `, clusterID, bounds.MinX, bounds.MaxX, bounds.MinY, bounds.MaxY)
+	if err != nil {
+		return nil, fmt.Errorf("metadata dist query: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]map[string]float64)
+	var (
+		k, v string
+		cnt  uint64
+	)
+	for rows.Next() {
+		if err := rows.Scan(&k, &v, &cnt); err != nil {
+			return nil, fmt.Errorf("scan metadata dist row: %w", err)
+		}
+		inner, ok := out[k]
+		if !ok {
+			inner = make(map[string]float64)
+			out[k] = inner
+		}
+		inner[v] = float64(cnt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("metadata dist rows: %w", err)
+	}
+	return out, nil
 }
