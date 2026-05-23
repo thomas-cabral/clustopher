@@ -28,6 +28,21 @@ type CHPointRow struct {
 	Metadata   map[string]string
 }
 
+type CHStagingPointRow struct {
+	ClusterID  string
+	ExternalID uint32
+	X          float32
+	Y          float32
+	Metrics    map[string]float32
+	Metadata   map[string]string
+}
+
+type CHPointIDMapRow struct {
+	LoadID     uint64
+	ExternalID uint32
+	InternalID uint32
+}
+
 // InsertPoints batches rows into clustopher.points using the native protocol.
 // Rows should already be in (cluster_id, id) primary-key order to minimize
 // MergeTree merges.
@@ -46,6 +61,44 @@ func (c *CHClient) InsertPoints(ctx context.Context, rows []CHPointRow) error {
 	}
 	if err := batch.Send(); err != nil {
 		return fmt.Errorf("send batch: %w", err)
+	}
+	return nil
+}
+
+func (c *CHClient) InsertStagingPoints(ctx context.Context, rows []CHStagingPointRow) error {
+	ctx = clickhouse.Context(ctx, clickhouse.WithSettings(insertSettings))
+	batch, err := c.conn.PrepareBatch(ctx,
+		"INSERT INTO clustopher.staging_points (cluster_id, external_id, x, y, metrics, metadata)")
+	if err != nil {
+		return fmt.Errorf("prepare staging batch: %w", err)
+	}
+	for i := range rows {
+		r := &rows[i]
+		if err := batch.Append(r.ClusterID, r.ExternalID, r.X, r.Y, r.Metrics, r.Metadata); err != nil {
+			return fmt.Errorf("append staging row %d: %w", i, err)
+		}
+	}
+	if err := batch.Send(); err != nil {
+		return fmt.Errorf("send staging batch: %w", err)
+	}
+	return nil
+}
+
+func (c *CHClient) InsertPointIDMap(ctx context.Context, rows []CHPointIDMapRow) error {
+	ctx = clickhouse.Context(ctx, clickhouse.WithSettings(insertSettings))
+	batch, err := c.conn.PrepareBatch(ctx,
+		"INSERT INTO clustopher.point_id_map_load (load_id, external_id, internal_id)")
+	if err != nil {
+		return fmt.Errorf("prepare id map batch: %w", err)
+	}
+	for i := range rows {
+		r := &rows[i]
+		if err := batch.Append(r.LoadID, r.ExternalID, r.InternalID); err != nil {
+			return fmt.Errorf("append id map row %d: %w", i, err)
+		}
+	}
+	if err := batch.Send(); err != nil {
+		return fmt.Errorf("send id map batch: %w", err)
 	}
 	return nil
 }

@@ -4,7 +4,16 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
+	"strings"
 )
+
+const maxLeafIDRangesPerQuery = 128
+
+type leafIDRange struct {
+	min uint32
+	max uint32
+}
 
 // queryRollup queries the per-zoom rollup table for the viewport.
 func (sc *Supercluster) queryRollup(ctx context.Context, viewport KDBounds, zoom int) ([]ClusterNode, error) {
@@ -38,11 +47,19 @@ func (sc *Supercluster) queryRollup(ctx context.Context, viewport KDBounds, zoom
 
 	table := fmt.Sprintf("clustopher.rollup_z%d", zoom)
 	q := fmt.Sprintf(`
-        SELECT tile_x, tile_y, cnt, sum_x, sum_y, metric_sums, metric_cnts
+        SELECT
+          tile_x,
+          tile_y,
+          sum(cnt) AS cnt,
+          sum(sum_x) AS sum_x,
+          sum(sum_y) AS sum_y,
+          sumMap(metric_sums) AS metric_sums,
+          sumMap(metric_cnts) AS metric_cnts
         FROM %s
         WHERE cluster_id = ?
           AND tile_x BETWEEN ? AND ?
           AND tile_y BETWEEN ? AND ?
+        GROUP BY tile_x, tile_y
     `, table)
 
 	rows, err := sc.ch.Conn().Query(ctx, q, sc.clusterID, minTX, maxTX, minTY, maxTY)
@@ -172,25 +189,31 @@ func (sc *Supercluster) queryTree(ctx context.Context, viewport KDBounds, zoom i
 }
 
 // aggregateLeaves emits one ClusterNode per inside leaf by aggregating across
-// each leaf's id range in CH. Uses intDiv(id-1, NodeSize) to map each point to
-// its leaf index — query string stays fixed-size regardless of leaf count.
-// Leaves whose point count falls below MinPoints are returned in skipped so the
-// caller can route them through the partial-leaf path (fetchLeafPoints +
-// clusterPoints) to avoid silently dropping their points.
+// each leaf's id range in CH. Leaves are compressed into contiguous internal-id
+// ranges so dense full-viewport queries do not serialize giant leaf arrays into
+// ClickHouse query text. Leaves whose point count falls below MinPoints are
+// returned in skipped so the caller can route them through the partial-leaf path
+// (fetchLeafPoints + clusterPoints) to avoid silently dropping their points.
 func (sc *Supercluster) aggregateLeaves(ctx context.Context, leaves []int32) (clusters []ClusterNode, skipped []int32, err error) {
 	if len(leaves) == 0 {
 		return nil, nil, nil
 	}
 
-	// Build an Array(UInt64) of the leaf indexes we care about.
-	// intDiv(id - 1, NodeSize) maps each point's id to its leaf index.
-	leafIdxArr := make([]uint64, len(leaves))
-	for i, li := range leaves {
-		leafIdxArr[i] = uint64(li)
+	ranges := sc.leafIDRanges(leaves)
+	if len(ranges) == 0 {
+		return nil, nil, nil
 	}
 	nodeSize := uint64(sc.Options.NodeSize)
 
-	q := fmt.Sprintf(`
+	out := make([]ClusterNode, 0, len(leaves))
+	var skip []int32
+	for start := 0; start < len(ranges); start += maxLeafIDRangesPerQuery {
+		end := start + maxLeafIDRangesPerQuery
+		if end > len(ranges) {
+			end = len(ranges)
+		}
+		where, rangeArgs := leafRangePredicate(ranges[start:end])
+		q := fmt.Sprintf(`
         SELECT
             toInt32(intDiv(id - 1, %d)) AS leaf_idx,
             count() AS cnt,
@@ -200,90 +223,154 @@ func (sc *Supercluster) aggregateLeaves(ctx context.Context, leaves []int32) (cl
             sumMap(mapFromArrays(mapKeys(metrics), arrayMap(v -> toUInt64(1), mapValues(metrics)))) AS mcnt
         FROM clustopher.points
         WHERE cluster_id = ?
-          AND has(?, intDiv(id - 1, %d))
+          AND (%s)
         GROUP BY leaf_idx
-    `, nodeSize, nodeSize)
+    `, nodeSize, where)
 
-	rows, err := sc.ch.Conn().Query(ctx, q, sc.clusterID, leafIdxArr)
-	if err != nil {
-		return nil, nil, fmt.Errorf("aggregate leaves: %w", err)
-	}
-	defer rows.Close()
+		args := make([]any, 0, 1+len(rangeArgs))
+		args = append(args, sc.clusterID)
+		args = append(args, rangeArgs...)
 
-	out := make([]ClusterNode, 0, len(leaves))
-	var skip []int32
-	var (
-		leafIdx int32
-		cnt     uint64
-		cx, cy  float64
-		msum    map[string]float64
-		mcnt    map[string]uint64
-	)
-	for rows.Next() {
-		if err := rows.Scan(&leafIdx, &cnt, &cx, &cy, &msum, &mcnt); err != nil {
-			return nil, nil, fmt.Errorf("scan agg row: %w", err)
+		rows, err := sc.ch.Conn().Query(ctx, q, args...)
+		if err != nil {
+			return nil, nil, fmt.Errorf("aggregate leaves: %w", err)
 		}
-		if cnt < uint64(sc.Options.MinPoints) {
-			skip = append(skip, leafIdx)
-			continue
-		}
-		metrics := make(map[string]float32, len(msum))
-		for k, s := range msum {
-			if n := mcnt[k]; n > 0 {
-				metrics[k] = float32(s / float64(n))
+		var (
+			leafIdx int32
+			cnt     uint64
+			cx, cy  float64
+			msum    map[string]float64
+			mcnt    map[string]uint64
+		)
+		for rows.Next() {
+			if err := rows.Scan(&leafIdx, &cnt, &cx, &cy, &msum, &mcnt); err != nil {
+				rows.Close()
+				return nil, nil, fmt.Errorf("scan agg row: %w", err)
 			}
+			if cnt < uint64(sc.Options.MinPoints) {
+				skip = append(skip, leafIdx)
+				continue
+			}
+			metrics := make(map[string]float32, len(msum))
+			for k, s := range msum {
+				if n := mcnt[k]; n > 0 {
+					metrics[k] = float32(s / float64(n))
+				}
+			}
+			out = append(out, ClusterNode{
+				ID:      uint32(leafIdx),
+				X:       float32(cx),
+				Y:       float32(cy),
+				Count:   uint32(cnt),
+				Metrics: metrics,
+			})
 		}
-		out = append(out, ClusterNode{
-			ID:      uint32(leafIdx),
-			X:       float32(cx),
-			Y:       float32(cy),
-			Count:   uint32(cnt),
-			Metrics: metrics,
-		})
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		rows.Close()
 	}
-	return out, skip, rows.Err()
+	return out, skip, nil
 }
 
 // fetchLeafPoints fetches all points belonging to the given leaves and returns
 // them projected to the target zoom (so existing clusterPoints can run).
-// Uses intDiv(id-1, NodeSize) + has() to keep the query string fixed-size
-// regardless of leaf count, avoiding CH max_query_size limits.
+// Leaves are compressed into contiguous internal-id ranges to avoid serializing
+// large leaf arrays into ClickHouse query text.
 func (sc *Supercluster) fetchLeafPoints(ctx context.Context, leaves []int32, zoom int) ([]KDPoint, error) {
 	if len(leaves) == 0 {
 		return nil, nil
 	}
 
-	// Build an Array(UInt64) of the leaf indexes we care about.
-	// intDiv(id - 1, NodeSize) maps each point's id to its leaf index.
-	leafIdxArr := make([]uint64, len(leaves))
-	for i, li := range leaves {
-		leafIdxArr[i] = uint64(li)
+	ranges := sc.leafIDRanges(leaves)
+	if len(ranges) == 0 {
+		return nil, nil
 	}
-	nodeSize := uint64(sc.Options.NodeSize)
-
-	q := fmt.Sprintf(`
-        SELECT id, x, y FROM clustopher.points
-        WHERE cluster_id = ?
-          AND has(?, intDiv(id - 1, %d))
-    `, nodeSize)
-
-	rows, err := sc.ch.Conn().Query(ctx, q, sc.clusterID, leafIdxArr)
-	if err != nil {
-		return nil, fmt.Errorf("fetch leaf points: %w", err)
-	}
-	defer rows.Close()
 
 	out := make([]KDPoint, 0, len(leaves)*sc.Options.NodeSize)
-	var id uint32
-	var x, y float32
-	for rows.Next() {
-		if err := rows.Scan(&id, &x, &y); err != nil {
+	for start := 0; start < len(ranges); start += maxLeafIDRangesPerQuery {
+		end := start + maxLeafIDRangesPerQuery
+		if end > len(ranges) {
+			end = len(ranges)
+		}
+		where, rangeArgs := leafRangePredicate(ranges[start:end])
+		q := fmt.Sprintf(`
+        SELECT id, x, y FROM clustopher.points
+        WHERE cluster_id = ?
+          AND (%s)
+    `, where)
+
+		args := make([]any, 0, 1+len(rangeArgs))
+		args = append(args, sc.clusterID)
+		args = append(args, rangeArgs...)
+
+		rows, err := sc.ch.Conn().Query(ctx, q, args...)
+		if err != nil {
+			return nil, fmt.Errorf("fetch leaf points: %w", err)
+		}
+		var id uint32
+		var x, y float32
+		for rows.Next() {
+			if err := rows.Scan(&id, &x, &y); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			proj := sc.projectFast(x, y, zoom)
+			out = append(out, KDPoint{ID: id, X: proj[0], Y: proj[1], NumPoints: 1})
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		proj := sc.projectFast(x, y, zoom)
-		out = append(out, KDPoint{ID: id, X: proj[0], Y: proj[1], NumPoints: 1})
+		rows.Close()
 	}
-	return out, rows.Err()
+	return out, nil
+}
+
+func (sc *Supercluster) leafIDRanges(leaves []int32) []leafIDRange {
+	if len(leaves) == 0 || sc.Skeleton == nil {
+		return nil
+	}
+	sorted := make([]int32, 0, len(leaves))
+	for _, leafIdx := range leaves {
+		if leafIdx >= 0 && int(leafIdx) < len(sc.Skeleton.Leaves) {
+			sorted = append(sorted, leafIdx)
+		}
+	}
+	if len(sorted) == 0 {
+		return nil
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+
+	ranges := make([]leafIDRange, 0, len(sorted))
+	for _, leafIdx := range sorted {
+		leaf := sc.Skeleton.Leaves[leafIdx]
+		next := leafIDRange{min: leaf.IDMin, max: leaf.IDMax}
+		if len(ranges) == 0 {
+			ranges = append(ranges, next)
+			continue
+		}
+		last := &ranges[len(ranges)-1]
+		if next.min <= last.max || (last.max < ^uint32(0) && next.min == last.max+1) {
+			if next.max > last.max {
+				last.max = next.max
+			}
+			continue
+		}
+		ranges = append(ranges, next)
+	}
+	return ranges
+}
+
+func leafRangePredicate(ranges []leafIDRange) (string, []any) {
+	parts := make([]string, len(ranges))
+	args := make([]any, 0, len(ranges)*2)
+	for i, r := range ranges {
+		parts[i] = "id BETWEEN ? AND ?"
+		args = append(args, r.min, r.max)
+	}
+	return strings.Join(parts, " OR "), args
 }
 
 // GetClustersCH is the CH-backed equivalent of GetClusters. Routes by zoom:

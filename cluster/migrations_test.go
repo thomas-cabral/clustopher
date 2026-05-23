@@ -38,14 +38,16 @@ func TestRunMigrations_CreatesTables(t *testing.T) {
 		t.Fatalf("RunMigrations: %v", err)
 	}
 
-	var n uint64
-	row := conn.QueryRow(context.Background(),
-		"SELECT count() FROM system.tables WHERE database='clustopher' AND name='points'")
-	if err := row.Scan(&n); err != nil {
-		t.Fatalf("scan: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("expected points table to exist, got count=%d", n)
+	for _, table := range []string{"points", "staging_points", "point_id_map", "point_id_map_load"} {
+		var n uint64
+		row := conn.QueryRow(context.Background(),
+			"SELECT count() FROM system.tables WHERE database='clustopher' AND name=?", table)
+		if err := row.Scan(&n); err != nil {
+			t.Fatalf("scan %s: %v", table, err)
+		}
+		if n != 1 {
+			t.Fatalf("expected %s table to exist, got count=%d", table, n)
+		}
 	}
 
 	for z := 2; z <= 16; z++ {

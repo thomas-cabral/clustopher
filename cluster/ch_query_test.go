@@ -9,6 +9,45 @@ import (
 	"testing"
 )
 
+func TestLeafIDRanges_MergesContiguousLeaves(t *testing.T) {
+	sc := &Supercluster{
+		Skeleton: &SkeletonTree{
+			Leaves: []SkeletonLeaf{
+				{IDMin: 1, IDMax: 64},
+				{IDMin: 65, IDMax: 128},
+				{IDMin: 129, IDMax: 192},
+				{IDMin: 257, IDMax: 320},
+			},
+		},
+	}
+
+	got := sc.leafIDRanges([]int32{3, 0, 1, 2})
+	if len(got) != 2 {
+		t.Fatalf("ranges len = %d, want 2: %+v", len(got), got)
+	}
+	if got[0] != (leafIDRange{min: 1, max: 192}) {
+		t.Fatalf("range 0 = %+v, want 1..192", got[0])
+	}
+	if got[1] != (leafIDRange{min: 257, max: 320}) {
+		t.Fatalf("range 1 = %+v, want 257..320", got[1])
+	}
+}
+
+func TestLeafRangePredicate_UsesBoundedBetweenClauses(t *testing.T) {
+	where, args := leafRangePredicate([]leafIDRange{
+		{min: 1, max: 64},
+		{min: 257, max: 320},
+	})
+
+	want := "id BETWEEN ? AND ? OR id BETWEEN ? AND ?"
+	if where != want {
+		t.Fatalf("where = %q, want %q", where, want)
+	}
+	if len(args) != 4 || args[0] != uint32(1) || args[1] != uint32(64) || args[2] != uint32(257) || args[3] != uint32(320) {
+		t.Fatalf("args = %#v", args)
+	}
+}
+
 func setupQueryFixture(t *testing.T, clusterID string, n int) *Supercluster {
 	t.Helper()
 	dsn := os.Getenv("CLICKHOUSE_DSN")
