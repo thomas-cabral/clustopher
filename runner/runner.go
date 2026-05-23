@@ -3,8 +3,10 @@ package runner
 import (
 	"context"
 	"fmt"
+	"os"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"time"
 
@@ -82,6 +84,12 @@ func (r *ClusterRunner) loadClusterIfNeeded(ctx context.Context, id string) (*cl
 
 	// Slow path: build skeleton from CH outside the lock so we don't hold it
 	// during a potentially long network call.
+	zsplit := 11
+	if v := os.Getenv("CLUSTOPHER_ZSPLIT"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			zsplit = parsed
+		}
+	}
 	sc := cluster.NewSupercluster(cluster.SuperclusterOptions{
 		MinZoom:   0,
 		MaxZoom:   16,
@@ -89,6 +97,7 @@ func (r *ClusterRunner) loadClusterIfNeeded(ctx context.Context, id string) (*cl
 		Radius:    40,
 		Extent:    512,
 		NodeSize:  64,
+		ZSplit:    zsplit,
 	})
 	sc.SetCHClient(r.ch)
 	sc.SetClusterID(id)

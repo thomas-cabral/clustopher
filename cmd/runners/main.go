@@ -44,7 +44,14 @@ func main() {
 		log.Fatalf("listen: %v", err)
 	}
 
-	s := grpc.NewServer()
+	// Raise default 4 MB message cap — at high zoom skeleton-path responses
+	// can return tens of thousands of clusters with Children member-id slices,
+	// well past 4 MB.
+	const maxMsg = 256 * 1024 * 1024
+	s := grpc.NewServer(
+		grpc.MaxRecvMsgSize(maxMsg),
+		grpc.MaxSendMsgSize(maxMsg),
+	)
 	clusterRunner := runner.NewClusterRunner(*maxClusters, ch)
 	proto.RegisterClusterServiceServer(s, clusterRunner)
 	reflection.Register(s)

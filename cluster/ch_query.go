@@ -187,7 +187,105 @@ func (sc *Supercluster) queryTree(ctx context.Context, viewport KDBounds, zoom i
 		}
 	}
 
+	// Second-pass radius merge: aggregateLeaves emits one ClusterNode per
+	// skeleton leaf without applying the cluster radius across leaves, so at
+	// dense data the inside-leaf path can return tens of thousands of micro-
+	// clusters that should be merged into a few hundred radius-blobs. Run the
+	// same radius merge on the combined `out` so the result respects the
+	// configured Options.Radius regardless of which sub-path produced each
+	// cluster.
+	if len(out) > 1 {
+		out = sc.mergeClustersByRadius(out, zoom, float32(sc.Options.Radius))
+	}
+
 	return out, nil
+}
+
+// mergeClustersByRadius coalesces ClusterNodes whose centers fall within
+// `radius` pixels at the given query zoom. Inputs and outputs are in lng/lat.
+// Counts and metric averages are aggregated weighted by each input cluster's
+// existing Count; metadata is carried over from the first contributor in the
+// group (we don't have enough per-cluster info to majority-vote across maps
+// at this stage — `attachAttrsFromMembers` already did that for skeleton-path
+// clusters that have raw member ids).
+func (sc *Supercluster) mergeClustersByRadius(clusters []ClusterNode, zoom int, radius float32) []ClusterNode {
+	if len(clusters) <= 1 {
+		return clusters
+	}
+	type pt struct {
+		idx  int
+		x, y float32
+	}
+	pts := make([]pt, len(clusters))
+	for i, c := range clusters {
+		proj := sc.projectFast(c.X, c.Y, zoom)
+		pts[i] = pt{idx: i, x: proj[0], y: proj[1]}
+	}
+	sort.Slice(pts, func(i, j int) bool { return pts[i].x < pts[j].x })
+
+	processed := make([]bool, len(clusters))
+	out := make([]ClusterNode, 0, len(clusters))
+	r2 := radius * radius
+
+	for i := range pts {
+		srcIdx := pts[i].idx
+		if processed[srcIdx] {
+			continue
+		}
+		group := []int{srcIdx}
+		for j := i + 1; j < len(pts); j++ {
+			if pts[j].x-pts[i].x > radius {
+				break
+			}
+			if processed[pts[j].idx] {
+				continue
+			}
+			dx := pts[j].x - pts[i].x
+			dy := pts[j].y - pts[i].y
+			if dx*dx+dy*dy <= r2 {
+				group = append(group, pts[j].idx)
+			}
+		}
+		if len(group) == 1 {
+			processed[srcIdx] = true
+			out = append(out, clusters[srcIdx])
+			continue
+		}
+		var sumX, sumY float64
+		var totalCount uint32
+		metricSum := make(map[string]float64)
+		merged := ClusterNode{
+			Metrics:  make(map[string]float32),
+			Metadata: make(map[string]json.RawMessage),
+		}
+		metaSeeded := false
+		for _, gi := range group {
+			c := clusters[gi]
+			w := float64(c.Count)
+			sumX += float64(c.X) * w
+			sumY += float64(c.Y) * w
+			totalCount += c.Count
+			for k, v := range c.Metrics {
+				metricSum[k] += float64(v) * w
+			}
+			if !metaSeeded && len(c.Metadata) > 0 {
+				for k, v := range c.Metadata {
+					merged.Metadata[k] = v
+				}
+				metaSeeded = true
+			}
+			processed[gi] = true
+		}
+		merged.ID = clusters[group[0]].ID
+		merged.X = float32(sumX / float64(totalCount))
+		merged.Y = float32(sumY / float64(totalCount))
+		merged.Count = totalCount
+		for k, s := range metricSum {
+			merged.Metrics[k] = float32(s / float64(totalCount))
+		}
+		out = append(out, merged)
+	}
+	return out
 }
 
 // pointAttrs carries per-point metrics + metadata fetched from CH alongside
