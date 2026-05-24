@@ -132,18 +132,24 @@ All sizes are measured against `LoadFromCHStreaming`, which pushes the spatial s
 
 | Points | CH stage gen | Load (skeleton + canonical points) | Rollup OPTIMIZE FINAL | Resident heap after load | Skeleton leaves |
 |--------|-------------:|-----------------------------------:|----------------------:|-------------------------:|----------------:|
-|   5 M  |   1.0 s |    13.5 s |   4.3 s |   10 MB |  78 K |
-|  15 M  |   2.1 s |    38.6 s |   4.7 s |   28 MB | 234 K |
-|  50 M  |   6.4 s |   131.4 s |   5.6 s |   74 MB | 781 K |
-| 100 M  |  12.8 s |   255.7 s |   5.8 s |  174 MB | 1.5 M |
-| 200 M  |  26.4 s |   538.4 s |   8.1 s |  336 MB | 3.1 M |
-| 300 M  |  40.8 s |   799.0 s |   7.6 s |  418 MB | 4.7 M |
-| 500 M  |  69.4 s | 1 320.1 s |   6.2 s |  812 MB | 7.8 M |
-| **1 B** | **178.5 s** | **2 747.3 s** | **7.4 s** | **1 580 MB** | **15.6 M** |
+|   5 M  |   1.8 s |    17.7 s |   5.3 s |   10 MB |  78 K |
+|  15 M  |   5.3 s |    33.9 s |   5.9 s |   26 MB | 234 K |
+|  50 M  |  16.8 s |    90.7 s |   6.1 s |   74 MB | 781 K |
+| 100 M  |  37.4 s |   168.4 s |   6.0 s |  174 MB | 1.5 M |
+| 200 M  |  74.5 s |   315.9 s |   6.3 s |  336 MB | 3.1 M |
+| 300 M  | 106.6 s |   475.4 s |   6.2 s |  418 MB | 4.7 M |
+| 500 M  | 180.1 s |   793.1 s |   6.4 s |  812 MB | 7.8 M |
+| **1 B** | **393.1 s** | **1 732.9 s** | **6.4 s** | **1 580 MB** | **15.6 M** |
 
 Resident heap is what the skeleton tree pins after `Load…` returns + GC. Raw points live in ClickHouse; Go holds only the bounds-only leaf index. Rollup `OPTIMIZE FINAL` collapses per-insert parts into a single sorted run per zoom partition — needed once after bulk load so the rollup path scans contiguous data.
 
 Rollup MVs are only created for zooms `[MinRollupZoom..MaxRollupZoom]` (currently 2–10), because the routing cutoff `ZSplit=11` means zooms 11+ are answered by the in-memory skeleton tree, never by the rollup path. Dropping the z11–z16 MVs cuts both incremental Load wall-clock (fewer MVs to fan to per insert block) and `OPTIMIZE FINAL` from minutes to single-digit seconds at every dataset size measured.
+
+##### Deferred MV populate (`CLUSTOPHER_DEFERRED_ROLLUPS=1`, default on)
+
+Each MV defined `FROM clustopher.points` fires per insert block, so 1 B point insertions used to drive ~9 B partial MV row writes (one per zoom level per source row) plus their downstream SummingMergeTree merges. Loading instead detaches all rollup MVs for the duration of `populatePointsFromStaging`, then runs one pre-aggregated `INSERT … SELECT … GROUP BY tile_x, tile_y` per zoom from the now-populated `points` table. Each batch writes at most 4ᴺ rollup rows (only ~1.5 M total across z2–z10 at 1 B points) so the SummingMergeTree starts in already-merged shape.
+
+Wall-clock effect at 1 B points: Load drops from 46 min (v3, incremental MVs) to **29 min** (deferred); total cold-load wall drops 49 min → **36 min**. The win scales with N — at 5 M the per-insert MV cost was tiny so deferred is slightly slower; at 100 M+ it's a clean 30–40 % cut.
 
 #### Query latency (`GetClustersCH`, 5-iter warm avg)
 
@@ -180,7 +186,9 @@ Tradeoff: Morton leaves are slightly looser than KD leaves (about 15 % more poin
 
 Columns are not strictly apples-to-apples — the old benchmarks always queried the full CONUS bbox, unrealistic at z14 where a real viewport is one neighborhood. With zoom-appropriate viewports the new system stays interactive across the entire zoom range, and now scales to ~67× the point count of the old in-memory system (1 B vs ~15 M before the heap blew up).
 
-Raw results: `benchmark_results/scale_streaming_full_v3.txt`, `benchmark_results/scale_streaming_1B_v3.txt`, `benchmark_results/baseline_15M.txt`.
+Raw results: `benchmark_results/scale_deferred_full.txt`, `benchmark_results/scale_deferred_1B.txt`, `benchmark_results/baseline_15M.txt`.
+
+> **Note on `CH stage gen` column**: jumped vs the prior README (e.g. 12.8 s → 37.4 s at 100 M) because `generateDenseStagingPoints` now emits richer test metadata (4 categorical + 3 numeric fields per point via separate `cityHash64(number, salt)` draws). That's unrelated to deferred-rollup work — it's bench-rig cost, not production cost.
 
 ### Limitations
 - Single-node ClickHouse only; no distributed CH support

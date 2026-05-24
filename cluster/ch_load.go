@@ -63,8 +63,23 @@ func (sc *Supercluster) LoadFromCHStaging(ctx context.Context) error {
 	if err := sc.writePointIDMap(ctx, loadID, sorted, remap, spatial); err != nil {
 		return err
 	}
+
+	deferred := rollupPopulateDeferred()
+	if deferred {
+		if err := sc.detachRollupMVs(ctx); err != nil {
+			return err
+		}
+		defer func() {
+			_ = sc.attachRollupMVs(context.Background())
+		}()
+	}
 	if err := sc.populatePointsFromStaging(ctx, loadID); err != nil {
 		return err
+	}
+	if deferred {
+		if err := sc.populateRollupsBatch(ctx); err != nil {
+			return err
+		}
 	}
 	return nil
 }

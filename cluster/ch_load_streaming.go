@@ -195,8 +195,22 @@ func (sc *Supercluster) LoadFromCHStreaming(ctx context.Context) error {
 
 	sc.Skeleton = BuildSkeletonFromLeaves(leaves)
 
+	deferred := rollupPopulateDeferred()
+	if deferred {
+		if err := sc.detachRollupMVs(ctx); err != nil {
+			return err
+		}
+		defer func() {
+			_ = sc.attachRollupMVs(context.Background())
+		}()
+	}
 	if err := sc.populatePointsFromStaging(ctx, loadID); err != nil {
 		return err
+	}
+	if deferred {
+		if err := sc.populateRollupsBatch(ctx); err != nil {
+			return err
+		}
 	}
 	return nil
 }
