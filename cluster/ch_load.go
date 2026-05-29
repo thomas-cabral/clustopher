@@ -280,8 +280,12 @@ func (sc *Supercluster) populatePointsFromStaging(ctx context.Context, loadID ui
 		settings[k] = v
 	}
 	settings["join_algorithm"] = "full_sorting_merge"
-	settings["max_bytes_before_external_sort"] = uint64(8 * 1024 * 1024 * 1024)
-	settings["max_bytes_before_external_group_by"] = uint64(8 * 1024 * 1024 * 1024)
+	// Per-thread thresholds: bound aggregate RAM by hard query cap + thread
+	// count. See LoadFromCHStreaming for rationale.
+	settings["max_memory_usage"] = uint64(60 * 1024 * 1024 * 1024)
+	settings["max_threads"] = uint64(20)
+	settings["max_bytes_before_external_sort"] = uint64(4 * 1024 * 1024 * 1024)
+	settings["max_bytes_before_external_group_by"] = uint64(4 * 1024 * 1024 * 1024)
 
 	ctx = clickhouse.Context(ctx, clickhouse.WithSettings(settings))
 	// No ORDER BY internal_id in the SELECT: MergeTree sorts blocks by the

@@ -3,7 +3,9 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
+	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 )
@@ -85,7 +87,21 @@ func (sc *Supercluster) LoadFromCHStreaming(ctx context.Context) error {
 	// Query: stream rows sorted by Morton index of normalized lng/lat. Bounds
 	// for normalization are fixed [-180,180] / [-90,90] so we don't need a
 	// pre-pass — Morton spatial locality holds on any subset of the world.
-	rows, err := sc.ch.Conn().Query(ctx, `
+	//
+	// Cap CH-server sort RAM. max_bytes_before_external_sort is a per-thread
+	// threshold, so the effective sort buffer = threshold * max_threads.
+	// Hard-cap query at 60GB; allow 20 threads × 4GB sort buffer = 80GB
+	// worst case, but cap forces spill earlier. External_sort=4GB balances
+	// spill frequency vs throughput.
+	queryCtx := clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{
+		"max_memory_usage":                   uint64(60 * 1024 * 1024 * 1024),
+		"max_threads":                        uint64(20),
+		"max_bytes_before_external_sort":     uint64(4 * 1024 * 1024 * 1024),
+		"max_bytes_before_external_group_by": uint64(4 * 1024 * 1024 * 1024),
+	}))
+	streamStart := time.Now()
+	log.Printf("[ch-stream] morton SELECT begin")
+	rows, err := sc.ch.Conn().Query(queryCtx, `
         SELECT external_id, x, y
         FROM clustopher.staging_points
         WHERE cluster_id = ?
@@ -140,6 +156,8 @@ func (sc *Supercluster) LoadFromCHStreaming(ctx context.Context) error {
 		extID uint32
 		x, y  float32
 	)
+	var rowsRead uint64
+	progressEvery := uint64(50_000_000)
 	for rows.Next() {
 		if err := rows.Scan(&extID, &x, &y); err != nil {
 			rows.Close()
@@ -173,15 +191,22 @@ func (sc *Supercluster) LoadFromCHStreaming(ctx context.Context) error {
 		}
 
 		internalID++
+		rowsRead++
+		if rowsRead%progressEvery == 0 {
+			log.Printf("[ch-stream] read %dM rows in %s", rowsRead/1_000_000, time.Since(streamStart).Round(time.Second))
+		}
 		if len(chunk) == nodeSize {
 			flushLeaf()
 		}
 	}
 	rows.Close()
 	flushLeaf()
+	log.Printf("[ch-stream] morton SELECT done: %d rows, %d leaves, %s", rowsRead, len(leaves), time.Since(streamStart).Round(time.Second))
 
 	close(idMapCh)
+	t := time.Now()
 	idMapWg.Wait()
+	log.Printf("[ch-stream] id-map workers drained in %s", time.Since(t).Round(time.Second))
 	close(idMapErrCh)
 	for werr := range idMapErrCh {
 		if werr != nil {
@@ -193,24 +218,32 @@ func (sc *Supercluster) LoadFromCHStreaming(ctx context.Context) error {
 		return fmt.Errorf("streaming rows: %w", err)
 	}
 
+	t = time.Now()
 	sc.Skeleton = BuildSkeletonFromLeaves(leaves)
+	log.Printf("[ch-stream] skeleton built in %s", time.Since(t).Round(time.Second))
 
 	deferred := rollupPopulateDeferred()
 	if deferred {
+		t = time.Now()
 		if err := sc.detachRollupMVs(ctx); err != nil {
 			return err
 		}
+		log.Printf("[ch-stream] detached rollup MVs in %s", time.Since(t).Round(time.Second))
 		defer func() {
 			_ = sc.attachRollupMVs(context.Background())
 		}()
 	}
+	t = time.Now()
 	if err := sc.populatePointsFromStaging(ctx, loadID); err != nil {
 		return err
 	}
+	log.Printf("[ch-stream] populate points from staging in %s", time.Since(t).Round(time.Second))
 	if deferred {
+		t = time.Now()
 		if err := sc.populateRollupsBatch(ctx); err != nil {
 			return err
 		}
+		log.Printf("[ch-stream] rollup batch populate in %s", time.Since(t).Round(time.Second))
 	}
 	return nil
 }

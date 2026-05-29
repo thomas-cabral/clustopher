@@ -125,10 +125,14 @@ func TestScalePerf(t *testing.T) {
 
 		loadStart := time.Now()
 		streaming := os.Getenv("CLUSTOPHER_SCALE_STREAMING") == "1"
+		singlepass := os.Getenv("CLUSTOPHER_SCALE_SINGLEPASS") == "1"
 		var loadErr error
-		if streaming {
+		switch {
+		case singlepass:
+			loadErr = sc.LoadFromCHSinglePass(ctx)
+		case streaming:
 			loadErr = sc.LoadFromCHStreaming(ctx)
-		} else {
+		default:
 			loadErr = sc.LoadFromCHStaging(ctx)
 		}
 		if loadErr != nil {
@@ -140,7 +144,10 @@ func TestScalePerf(t *testing.T) {
 		}
 		res.loadSec = time.Since(loadStart).Seconds()
 		loadPath := "KD"
-		if streaming {
+		switch {
+		case singlepass:
+			loadPath = "CH-single"
+		case streaming:
 			loadPath = "Morton-stream"
 		}
 		t.Logf("loaded %s points (%s) in %.1fs", humanCount(n), loadPath, res.loadSec)
