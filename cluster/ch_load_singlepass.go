@@ -61,7 +61,7 @@ func (sc *Supercluster) LoadFromCHSinglePass(ctx context.Context) error {
 	insertSettingsBuilt["max_bytes_before_external_sort"] = uint64(1 * 1024 * 1024 * 1024)
 	insertSettingsBuilt["max_bytes_before_external_group_by"] = uint64(1 * 1024 * 1024 * 1024)
 
-	insertCtx := clickhouse.Context(ctx, clickhouse.WithSettings(insertSettingsBuilt))
+	insertCtx := chQueryCtx(ctx, "sp-insert", insertSettingsBuilt)
 	t := time.Now()
 	log.Printf("[ch-single] morton+rowNumber INSERT begin")
 	if err := sc.ch.Conn().Exec(insertCtx, `
@@ -116,11 +116,11 @@ func (sc *Supercluster) readLeafBoundsFromPoints(ctx context.Context) ([]Skeleto
 	}
 	maxZoom := sc.Options.MaxZoom
 
-	queryCtx := clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{
+	queryCtx := chQueryCtx(ctx, "sp-leafbounds", clickhouse.Settings{
 		"max_memory_usage":                   uint64(20 * 1024 * 1024 * 1024),
 		"max_threads":                        uint64(20),
 		"max_bytes_before_external_group_by": uint64(4 * 1024 * 1024 * 1024),
-	}))
+	})
 	rows, err := sc.ch.Conn().Query(queryCtx, `
         SELECT
             intDiv(id - 1, ?) AS leaf,

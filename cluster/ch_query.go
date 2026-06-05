@@ -63,7 +63,7 @@ func (sc *Supercluster) queryRollup(ctx context.Context, viewport KDBounds, zoom
         GROUP BY tile_x, tile_y
     `, table)
 
-	rows, err := sc.ch.Conn().Query(ctx, q, sc.clusterID, minTX, maxTX, minTY, maxTY)
+	rows, err := sc.ch.Conn().Query(chQueryCtx(ctx, "q-rollup", nil), q, sc.clusterID, minTX, maxTX, minTY, maxTY)
 	if err != nil {
 		return nil, fmt.Errorf("query rollup: %w", err)
 	}
@@ -404,7 +404,7 @@ func (sc *Supercluster) aggregateLeaves(ctx context.Context, leaves []int32) (cl
 		args = append(args, sc.clusterID)
 		args = append(args, rangeArgs...)
 
-		rows, err := sc.ch.Conn().Query(ctx, q, args...)
+		rows, err := sc.ch.Conn().Query(chQueryCtx(ctx, "q-aggleaves", nil), q, args...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("aggregate leaves: %w", err)
 		}
@@ -479,7 +479,7 @@ func (sc *Supercluster) fetchLeafPoints(ctx context.Context, leaves []int32, zoo
 		args = append(args, sc.clusterID)
 		args = append(args, rangeArgs...)
 
-		rows, err := sc.ch.Conn().Query(ctx, q, args...)
+		rows, err := sc.ch.Conn().Query(chQueryCtx(ctx, "q-leafpoints", nil), q, args...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("fetch leaf points: %w", err)
 		}

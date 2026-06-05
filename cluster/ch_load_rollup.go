@@ -3,10 +3,10 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
-
-	"github.com/ClickHouse/clickhouse-go/v2"
+	"time"
 )
 
 // rollupPopulateMode reports whether rollups should be deferred and batch-
@@ -68,13 +68,10 @@ func (sc *Supercluster) attachRollupMVs(ctx context.Context) error {
 // then merged them. Same end state, vastly less write amplification.
 func (sc *Supercluster) populateRollupsBatch(ctx context.Context) error {
 	radius := DefaultRollupRadius
-	settings := clickhouse.Settings{}
-	for k, v := range insertSettings {
-		settings[k] = v
-	}
-	insertCtx := clickhouse.Context(ctx, clickhouse.WithSettings(settings))
 
 	for z := MinRollupZoom; z <= MaxRollupZoom; z++ {
+		insertCtx := chQueryCtx(ctx, "rollup-z"+strconv.Itoa(z), insertSettings)
+		zt := time.Now()
 		q := fmt.Sprintf(`
             INSERT INTO clustopher.rollup_z%d (cluster_id, tile_x, tile_y, cnt, sum_x, sum_y, metric_sums, metric_cnts)
             SELECT
@@ -93,6 +90,7 @@ func (sc *Supercluster) populateRollupsBatch(ctx context.Context) error {
 		if err := sc.ch.Conn().Exec(insertCtx, q, sc.clusterID); err != nil {
 			return fmt.Errorf("batch populate rollup_z%d: %w", z, err)
 		}
+		log.Printf("[rollup] z%d populate in %s", z, time.Since(zt).Round(time.Millisecond))
 	}
 	return nil
 }
