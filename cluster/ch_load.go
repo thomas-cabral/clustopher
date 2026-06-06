@@ -63,8 +63,23 @@ func (sc *Supercluster) LoadFromCHStaging(ctx context.Context) error {
 	if err := sc.writePointIDMap(ctx, loadID, sorted, remap, spatial); err != nil {
 		return err
 	}
+
+	deferred := rollupPopulateDeferred()
+	if deferred {
+		if err := sc.detachRollupMVs(ctx); err != nil {
+			return err
+		}
+		defer func() {
+			_ = sc.attachRollupMVs(context.Background())
+		}()
+	}
 	if err := sc.populatePointsFromStaging(ctx, loadID); err != nil {
 		return err
+	}
+	if deferred {
+		if err := sc.populateRollupsBatch(ctx); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -151,7 +166,7 @@ func (sc *Supercluster) resetCanonicalCluster(ctx context.Context) error {
 	if err := sc.ch.Conn().Exec(ctx, "ALTER TABLE clustopher.points DROP PARTITION ?", sc.clusterID); err != nil {
 		return fmt.Errorf("drop points partition: %w", err)
 	}
-	for z := 2; z <= 16; z++ {
+	for z := MinRollupZoom; z <= MaxRollupZoom; z++ {
 		if err := sc.ch.Conn().Exec(ctx, "ALTER TABLE clustopher.rollup_z"+strconv.Itoa(z)+" DROP PARTITION ?", sc.clusterID); err != nil {
 			return fmt.Errorf("drop rollup_z%d partition: %w", z, err)
 		}
@@ -265,10 +280,20 @@ func (sc *Supercluster) populatePointsFromStaging(ctx context.Context, loadID ui
 		settings[k] = v
 	}
 	settings["join_algorithm"] = "full_sorting_merge"
-	settings["max_bytes_before_external_sort"] = uint64(8 * 1024 * 1024 * 1024)
-	settings["max_bytes_before_external_group_by"] = uint64(8 * 1024 * 1024 * 1024)
+	// Per-thread thresholds: bound aggregate RAM by hard query cap + thread
+	// count. See LoadFromCHStreaming for rationale.
+	settings["max_memory_usage"] = uint64(60 * 1024 * 1024 * 1024)
+	settings["max_threads"] = uint64(20)
+	settings["max_bytes_before_external_sort"] = uint64(4 * 1024 * 1024 * 1024)
+	settings["max_bytes_before_external_group_by"] = uint64(4 * 1024 * 1024 * 1024)
 
 	ctx = clickhouse.Context(ctx, clickhouse.WithSettings(settings))
+	// No ORDER BY internal_id in the SELECT: MergeTree sorts blocks by the
+	// table's ORDER BY (cluster_id, id) on insert anyway. Forcing a full
+	// re-sort of the join output costs an extra N-row sort buffer on the CH
+	// server (~70 GB peak at 500M, blows past system RAM at 1B+). Without it
+	// CH inserts in join-stream order and merges into the final sorted parts
+	// in the background.
 	if err := sc.ch.Conn().Exec(ctx, `
         INSERT INTO clustopher.points (cluster_id, id, external_id, x, y, metrics, metadata)
         SELECT
@@ -284,7 +309,6 @@ func (sc *Supercluster) populatePointsFromStaging(ctx context.Context, loadID ui
             ON s.external_id = m.external_id
         WHERE s.cluster_id = ?
           AND m.load_id = ?
-        ORDER BY m.internal_id
     `, sc.clusterID, loadID); err != nil {
 		return fmt.Errorf("populate points from staging: %w", err)
 	}

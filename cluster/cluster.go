@@ -121,6 +121,17 @@ const (
 	// Changing this requires recreating all rollup_z* tables and their MVs;
 	// MVs are not auto-updated when this constant changes.
 	DefaultRollupRadius = 40
+
+	// MinRollupZoom / MaxRollupZoom bracket the zoom levels for which a rollup
+	// materialized view is created. Queries with `zoom < ZSplit` (default 11)
+	// hit these MVs; zooms >= ZSplit walk the skeleton tree instead. Creating
+	// MVs for zooms that are never queried via the rollup path is pure
+	// write-amplification cost during bulk Load (each MV multiplies the per-
+	// row insert cost), so we cap MaxRollupZoom one below the default ZSplit.
+	// If you raise ZSplit, raise MaxRollupZoom to match and rebuild the rollup
+	// tables.
+	MinRollupZoom = 2
+	MaxRollupZoom = 10
 )
 
 // NewSupercluster creates a new clustering instance
@@ -561,12 +572,16 @@ func (sc *Supercluster) createCluster(points []KDPoint) ClusterNode {
 		}
 	}
 
-	// Create cluster node
+	// Create cluster node. Children retains the member ids so the partial-leaf
+	// path in queryTree can reattach per-point metrics/metadata fetched
+	// alongside the geometry — the rollup MV and aggregateLeaves paths set
+	// metrics directly from SQL and leave Children empty.
 	cluster := ClusterNode{
 		ID:       points[0].ID, // Now this is safe because we've checked len(points) > 0
 		X:        float32(sumX / float64(totalPoints)),
 		Y:        float32(sumY / float64(totalPoints)),
 		Count:    totalPoints,
+		Children: pointIDs,
 		Metrics:  make(map[string]float32),
 		Metadata: make(map[string]json.RawMessage),
 	}
@@ -577,10 +592,11 @@ func (sc *Supercluster) createCluster(points []KDPoint) ClusterNode {
 // createSinglePointCluster creates a cluster for a single point
 func (sc *Supercluster) createSinglePointCluster(p KDPoint) ClusterNode {
 	return ClusterNode{
-		ID:    p.ID,
-		X:     p.X,
-		Y:     p.Y,
-		Count: 1,
+		ID:       p.ID,
+		X:        p.X,
+		Y:        p.Y,
+		Count:    1,
+		Children: []uint32{p.ID},
 	}
 }
 

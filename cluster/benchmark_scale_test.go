@@ -97,7 +97,7 @@ func TestScalePerf(t *testing.T) {
 		cleanup := func() {
 			_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.staging_points DROP PARTITION ?", clusterID)
 			_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.points DROP PARTITION ?", clusterID)
-			for z := 2; z <= 16; z++ {
+			for z := MinRollupZoom; z <= MaxRollupZoom; z++ {
 				_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.rollup_z"+strconv.Itoa(z)+" DROP PARTITION ?", clusterID)
 			}
 		}
@@ -124,15 +124,33 @@ func TestScalePerf(t *testing.T) {
 		sc.SetClusterID(clusterID)
 
 		loadStart := time.Now()
-		if err := sc.LoadFromCHStaging(ctx); err != nil {
-			res.err = fmt.Sprintf("load: %v", err)
+		streaming := os.Getenv("CLUSTOPHER_SCALE_STREAMING") == "1"
+		singlepass := os.Getenv("CLUSTOPHER_SCALE_SINGLEPASS") == "1"
+		var loadErr error
+		switch {
+		case singlepass:
+			loadErr = sc.LoadFromCHSinglePass(ctx)
+		case streaming:
+			loadErr = sc.LoadFromCHStreaming(ctx)
+		default:
+			loadErr = sc.LoadFromCHStaging(ctx)
+		}
+		if loadErr != nil {
+			res.err = fmt.Sprintf("load: %v", loadErr)
 			results = append(results, res)
 			cleanup()
 			t.Logf("FAIL %s: %s", humanCount(n), res.err)
 			continue
 		}
 		res.loadSec = time.Since(loadStart).Seconds()
-		t.Logf("loaded %s points (CH-first) in %.1fs", humanCount(n), res.loadSec)
+		loadPath := "KD"
+		switch {
+		case singlepass:
+			loadPath = "CH-single"
+		case streaming:
+			loadPath = "Morton-stream"
+		}
+		t.Logf("loaded %s points (%s) in %.1fs", humanCount(n), loadPath, res.loadSec)
 
 		// Free intermediates and force GC so the resident-after-load measurement
 		// reflects what the skeleton actually pins.
@@ -150,7 +168,7 @@ func TestScalePerf(t *testing.T) {
 		_ = c.Conn().Exec(ctx, "ALTER TABLE clustopher.staging_points DROP PARTITION ?", clusterID)
 
 		optStart := time.Now()
-		for z := 2; z <= 16; z++ {
+		for z := MinRollupZoom; z <= MaxRollupZoom; z++ {
 			_ = c.Conn().Exec(ctx, "OPTIMIZE TABLE clustopher.rollup_z"+strconv.Itoa(z)+" PARTITION ? FINAL", clusterID)
 		}
 		res.optimizeSec = time.Since(optStart).Seconds()

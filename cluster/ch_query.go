@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -62,7 +63,7 @@ func (sc *Supercluster) queryRollup(ctx context.Context, viewport KDBounds, zoom
         GROUP BY tile_x, tile_y
     `, table)
 
-	rows, err := sc.ch.Conn().Query(ctx, q, sc.clusterID, minTX, maxTX, minTY, maxTY)
+	rows, err := sc.ch.Conn().Query(chQueryCtx(ctx, "q-rollup", nil), q, sc.clusterID, minTX, maxTX, minTY, maxTY)
 	if err != nil {
 		return nil, fmt.Errorf("query rollup: %w", err)
 	}
@@ -174,18 +175,117 @@ func (sc *Supercluster) queryTree(ctx context.Context, viewport KDBounds, zoom i
 	}
 
 	if len(partial) > 0 {
-		pts, err := sc.fetchLeafPoints(ctx, partial, zoom)
+		pts, attrs, err := sc.fetchLeafPoints(ctx, partial, zoom)
 		if err != nil {
 			return nil, err
 		}
 		if len(pts) > 0 {
 			clusters := sc.clusterPoints(pts, float32(sc.Options.Radius))
+			attachAttrsFromMembers(clusters, attrs)
 			sc.unprojectClusters(clusters, zoom)
 			out = append(out, clusters...)
 		}
 	}
 
+	// Second-pass radius merge: aggregateLeaves emits one ClusterNode per
+	// skeleton leaf without applying the cluster radius across leaves, so at
+	// dense data the inside-leaf path can return tens of thousands of micro-
+	// clusters that should be merged into a few hundred radius-blobs. Run the
+	// same radius merge on the combined `out` so the result respects the
+	// configured Options.Radius regardless of which sub-path produced each
+	// cluster.
+	if len(out) > 1 {
+		out = sc.mergeClustersByRadius(out, zoom, float32(sc.Options.Radius))
+	}
+
 	return out, nil
+}
+
+// mergeClustersByRadius coalesces ClusterNodes whose centers fall within
+// `radius` pixels at the given query zoom. Inputs and outputs are in lng/lat.
+// Counts and metric averages are aggregated weighted by each input cluster's
+// existing Count; metadata is carried over from the first contributor in the
+// group (we don't have enough per-cluster info to majority-vote across maps
+// at this stage — `attachAttrsFromMembers` already did that for skeleton-path
+// clusters that have raw member ids).
+func (sc *Supercluster) mergeClustersByRadius(clusters []ClusterNode, zoom int, radius float32) []ClusterNode {
+	if len(clusters) <= 1 {
+		return clusters
+	}
+	type pt struct {
+		idx  int
+		x, y float32
+	}
+	pts := make([]pt, len(clusters))
+	for i, c := range clusters {
+		proj := sc.projectFast(c.X, c.Y, zoom)
+		pts[i] = pt{idx: i, x: proj[0], y: proj[1]}
+	}
+	sort.Slice(pts, func(i, j int) bool { return pts[i].x < pts[j].x })
+
+	processed := make([]bool, len(clusters))
+	out := make([]ClusterNode, 0, len(clusters))
+	r2 := radius * radius
+
+	for i := range pts {
+		srcIdx := pts[i].idx
+		if processed[srcIdx] {
+			continue
+		}
+		group := []int{srcIdx}
+		for j := i + 1; j < len(pts); j++ {
+			if pts[j].x-pts[i].x > radius {
+				break
+			}
+			if processed[pts[j].idx] {
+				continue
+			}
+			dx := pts[j].x - pts[i].x
+			dy := pts[j].y - pts[i].y
+			if dx*dx+dy*dy <= r2 {
+				group = append(group, pts[j].idx)
+			}
+		}
+		if len(group) == 1 {
+			processed[srcIdx] = true
+			out = append(out, clusters[srcIdx])
+			continue
+		}
+		var sumX, sumY float64
+		var totalCount uint32
+		metricSum := make(map[string]float64)
+		merged := ClusterNode{
+			Metrics:  make(map[string]float32),
+			Metadata: make(map[string]json.RawMessage),
+		}
+		metaSeeded := false
+		for _, gi := range group {
+			c := clusters[gi]
+			w := float64(c.Count)
+			sumX += float64(c.X) * w
+			sumY += float64(c.Y) * w
+			totalCount += c.Count
+			for k, v := range c.Metrics {
+				metricSum[k] += float64(v) * w
+			}
+			if !metaSeeded && len(c.Metadata) > 0 {
+				for k, v := range c.Metadata {
+					merged.Metadata[k] = v
+				}
+				metaSeeded = true
+			}
+			processed[gi] = true
+		}
+		merged.ID = clusters[group[0]].ID
+		merged.X = float32(sumX / float64(totalCount))
+		merged.Y = float32(sumY / float64(totalCount))
+		merged.Count = totalCount
+		for k, s := range metricSum {
+			merged.Metrics[k] = float32(s / float64(totalCount))
+		}
+		out = append(out, merged)
+	}
+	return out
 }
 
 // aggregateLeaves emits one ClusterNode per inside leaf by aggregating across
@@ -231,7 +331,7 @@ func (sc *Supercluster) aggregateLeaves(ctx context.Context, leaves []int32) (cl
 		args = append(args, sc.clusterID)
 		args = append(args, rangeArgs...)
 
-		rows, err := sc.ch.Conn().Query(ctx, q, args...)
+		rows, err := sc.ch.Conn().Query(chQueryCtx(ctx, "q-aggleaves", nil), q, args...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("aggregate leaves: %w", err)
 		}
@@ -278,25 +378,30 @@ func (sc *Supercluster) aggregateLeaves(ctx context.Context, leaves []int32) (cl
 // them projected to the target zoom (so existing clusterPoints can run).
 // Leaves are compressed into contiguous internal-id ranges to avoid serializing
 // large leaf arrays into ClickHouse query text.
-func (sc *Supercluster) fetchLeafPoints(ctx context.Context, leaves []int32, zoom int) ([]KDPoint, error) {
+func (sc *Supercluster) fetchLeafPoints(ctx context.Context, leaves []int32, zoom int) ([]KDPoint, *attrArena, error) {
 	if len(leaves) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	ranges := sc.leafIDRanges(leaves)
 	if len(ranges) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	out := make([]KDPoint, 0, len(leaves)*sc.Options.NodeSize)
+	attrs := newAttrArena()
 	for start := 0; start < len(ranges); start += maxLeafIDRangesPerQuery {
 		end := start + maxLeafIDRangesPerQuery
 		if end > len(ranges) {
 			end = len(ranges)
 		}
 		where, rangeArgs := leafRangePredicate(ranges[start:end])
+		// Note: scanning the Map columns directly is faster than selecting
+		// mapKeys()/mapValues() arrays — the driver's reflection-based
+		// Array.ScanRow costs ~2x Map.ScanRow for the same data (measured at
+		// 100M: z14 avg 99ms with Map scan vs 154ms with array scan).
 		q := fmt.Sprintf(`
-        SELECT id, x, y FROM clustopher.points
+        SELECT id, x, y, metrics, metadata FROM clustopher.points
         WHERE cluster_id = ?
           AND (%s)
     `, where)
@@ -305,27 +410,32 @@ func (sc *Supercluster) fetchLeafPoints(ctx context.Context, leaves []int32, zoo
 		args = append(args, sc.clusterID)
 		args = append(args, rangeArgs...)
 
-		rows, err := sc.ch.Conn().Query(ctx, q, args...)
+		rows, err := sc.ch.Conn().Query(chQueryCtx(ctx, "q-leafpoints", nil), q, args...)
 		if err != nil {
-			return nil, fmt.Errorf("fetch leaf points: %w", err)
+			return nil, nil, fmt.Errorf("fetch leaf points: %w", err)
 		}
-		var id uint32
-		var x, y float32
+		var (
+			id       uint32
+			x, y     float32
+			metrics  map[string]float32
+			metadata map[string]string
+		)
 		for rows.Next() {
-			if err := rows.Scan(&id, &x, &y); err != nil {
+			if err := rows.Scan(&id, &x, &y, &metrics, &metadata); err != nil {
 				rows.Close()
-				return nil, err
+				return nil, nil, err
 			}
 			proj := sc.projectFast(x, y, zoom)
 			out = append(out, KDPoint{ID: id, X: proj[0], Y: proj[1], NumPoints: 1})
+			attrs.add(id, metrics, metadata)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, nil, err
 		}
 		rows.Close()
 	}
-	return out, nil
+	return out, attrs, nil
 }
 
 func (sc *Supercluster) leafIDRanges(leaves []int32) []leafIDRange {

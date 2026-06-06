@@ -60,8 +60,16 @@ func main() {
 	apiPort := flag.String("port", "8000", "HTTP API listen port")
 	flag.Parse()
 
-	// Connect to cluster runner
-	conn, err := grpc.Dial(*runnersAddr, grpc.WithInsecure())
+	// Connect to cluster runner. Match the runner's 256 MB cap so high-zoom
+	// skeleton-path responses (Children-bearing ClusterNodes) round-trip OK.
+	const maxMsg = 256 * 1024 * 1024
+	conn, err := grpc.Dial(*runnersAddr,
+		grpc.WithInsecure(),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(maxMsg),
+			grpc.MaxCallSendMsgSize(maxMsg),
+		),
+	)
 	if err != nil {
 		fmt.Printf("Failed to connect to cluster runner: %v\n", err)
 		os.Exit(1)

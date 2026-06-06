@@ -2,6 +2,11 @@
 -- cluster.DefaultRollupRadius. Recreate all MVs if DefaultRollupRadius changes
 -- — the value is baked into stored tile coords.
 
+-- metric_sums / metric_cnts must be SimpleAggregateFunction(sumMap, ...) so
+-- SummingMergeTree merges them by summing values across matching keys.
+-- Plain Map columns are NOT auto-summed by SummingMT — rows with identical
+-- sort keys keep only one row's map after merge, so per-tile metric totals
+-- silently become "one point's worth" instead of "all points in tile".
 CREATE TABLE IF NOT EXISTS clustopher.rollup_z{N} (
     cluster_id  String,
     tile_x      UInt32,
@@ -9,8 +14,8 @@ CREATE TABLE IF NOT EXISTS clustopher.rollup_z{N} (
     cnt         UInt64,
     sum_x       Float64,
     sum_y       Float64,
-    metric_sums Map(String, Float64),
-    metric_cnts Map(String, UInt64)
+    metric_sums SimpleAggregateFunction(sumMap, Map(String, Float64)),
+    metric_cnts SimpleAggregateFunction(sumMap, Map(String, UInt64))
 ) ENGINE = SummingMergeTree
 PARTITION BY cluster_id
 ORDER BY (cluster_id, tile_x, tile_y);
