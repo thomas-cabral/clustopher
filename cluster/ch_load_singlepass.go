@@ -61,10 +61,34 @@ func (sc *Supercluster) LoadFromCHSinglePass(ctx context.Context) error {
 	insertSettingsBuilt["max_bytes_before_external_sort"] = uint64(1 * 1024 * 1024 * 1024)
 	insertSettingsBuilt["max_bytes_before_external_group_by"] = uint64(1 * 1024 * 1024 * 1024)
 
-	insertCtx := chQueryCtx(ctx, "sp-insert", insertSettingsBuilt)
+	// Profiling at 100M showed the fixed 1 GiB/thread threshold spills 12 GiB
+	// to disk while peak RAM sits at 11 GiB of an 80 GiB cap — pure waste when
+	// the whole sort carry fits in the budget. If the staging partition's
+	// uncompressed size (a good proxy for sort carry) fits comfortably, raise
+	// the per-thread threshold so the sort never spills. Loads too big for the
+	// budget (the 3B case) keep the proven tight caps above.
+	if carry, err := sc.stagingUncompressedBytes(ctx); err == nil && carry > 0 {
+		const sortBudget = uint64(48 * 1024 * 1024 * 1024) // 60% of the 80 GiB cap
+		if carry+carry/2 < sortBudget {                    // 1.5x safety factor for sort overhead
+			perThread := sortBudget / 10
+			insertSettingsBuilt["max_bytes_before_external_sort"] = perThread
+			log.Printf("[ch-single] staging carry %.1f GiB fits sort budget; spill threshold %.1f GiB/thread",
+				float64(carry)/(1<<30), float64(perThread)/(1<<30))
+		} else {
+			log.Printf("[ch-single] staging carry %.1f GiB exceeds sort budget; keeping tight spill caps",
+				float64(carry)/(1<<30))
+		}
+	}
+
 	t := time.Now()
 	log.Printf("[ch-single] morton+rowNumber INSERT begin")
-	if err := sc.ch.Conn().Exec(insertCtx, `
+	if k := singlePassPartitions(); k > 1 {
+		if err := sc.singlePassInsertPartitioned(ctx, k, insertSettingsBuilt); err != nil {
+			return fmt.Errorf("single-pass partitioned insert: %w", err)
+		}
+	} else {
+		insertCtx := chQueryCtx(ctx, "sp-insert", insertSettingsBuilt)
+		if err := sc.ch.Conn().Exec(insertCtx, fmt.Sprintf(`
         INSERT INTO clustopher.points (cluster_id, id, external_id, x, y, metrics, metadata)
         SELECT
             cluster_id,
@@ -76,12 +100,10 @@ func (sc *Supercluster) LoadFromCHSinglePass(ctx context.Context) error {
             metadata
         FROM clustopher.staging_points
         WHERE cluster_id = ?
-        ORDER BY mortonEncode(
-            toUInt32((x + 180.0) / 360.0 * 4294967295),
-            toUInt32((y + 90.0)  / 180.0 * 4294967295)
-        )
-    `, sc.clusterID); err != nil {
-		return fmt.Errorf("single-pass insert: %w", err)
+        ORDER BY %s
+    `, mortonExprSQL), sc.clusterID); err != nil {
+			return fmt.Errorf("single-pass insert: %w", err)
+		}
 	}
 	log.Printf("[ch-single] INSERT done in %s", time.Since(t).Round(time.Second))
 
@@ -104,6 +126,21 @@ func (sc *Supercluster) LoadFromCHSinglePass(ctx context.Context) error {
 		log.Printf("[ch-single] rollup batch populate in %s", time.Since(t).Round(time.Second))
 	}
 	return nil
+}
+
+// stagingUncompressedBytes returns the uncompressed on-disk size of the
+// current cluster's staging partition — the sort pipeline's input carry.
+func (sc *Supercluster) stagingUncompressedBytes(ctx context.Context) (uint64, error) {
+	var n uint64
+	if err := sc.ch.Conn().QueryRow(ctx, `
+        SELECT sum(data_uncompressed_bytes)
+        FROM system.parts
+        WHERE database = 'clustopher' AND table = 'staging_points'
+          AND active AND partition = ?
+    `, sc.clusterID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("staging uncompressed bytes: %w", err)
+	}
+	return n, nil
 }
 
 // readLeafBoundsFromPoints groups the newly inserted points into NodeSize-row
